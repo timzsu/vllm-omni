@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
+from typing import Any
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isqrt
@@ -323,6 +324,8 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         image_shape = (height, width)
 
         extra_args = getattr(req.sampling_params, "extra_args", {}) or {}
+        return_trajectory_latents = getattr(req.sampling_params, "return_trajectory_latents", False)
+        return_trajectory_decoded = getattr(req.sampling_params, "return_trajectory_decoded", False)
         cfg_text_scale = extra_args.get("cfg_text_scale", 4.0)
         cfg_img_scale = extra_args.get("cfg_img_scale", 1.5)
 
@@ -630,7 +633,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
             enabled=self.device.type != "cpu",
             dtype=self.od_config.dtype,
         ):
-            latents = self.bagel.generate_image(
+            latents, traj_latents, traj_timesteps = self.bagel.generate_image(
                 past_key_values=gen_context["past_key_values"],
                 cfg_text_past_key_values=cfg_text_context["past_key_values"],
                 cfg_img_past_key_values=cfg_img_context["past_key_values"],
@@ -641,6 +644,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
                 cfg_interval=gen_params.cfg_interval,
                 cfg_renorm_min=gen_params.cfg_renorm_min,
                 cfg_renorm_type=gen_params.cfg_renorm_type,
+                return_trajectory_latents=return_trajectory_latents,
                 **generation_input,
                 cfg_text_packed_position_ids=generation_input_cfg_text["cfg_packed_position_ids"],
                 cfg_text_packed_query_indexes=generation_input_cfg_text["cfg_packed_query_indexes"],
@@ -653,8 +657,28 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
             )
 
         img = self._decode_image_from_latent(self.bagel, self.vae, latents[0], image_shape)
+
+        # Build trajectory output when requested
+        custom_output: dict[str, Any] = {}
+        trajectory_latents_stacked = None
+        trajectory_decoded = None
+        if traj_latents is not None:
+            trajectory_latents_stacked = torch.stack(traj_latents)
+            custom_output["all_latents"] = trajectory_latents_stacked.cpu()
+            custom_output["all_timesteps"] = torch.stack(traj_timesteps).cpu()
+            if return_trajectory_decoded:
+                trajectory_decoded = [
+                    self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape)
+                    for lat in traj_latents
+                ]
+
         return DiffusionOutput(
-            output=img, stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None
+            output=img,
+            trajectory_latents=trajectory_latents_stacked,
+            trajectory_timesteps=traj_timesteps,
+            trajectory_decoded=trajectory_decoded,
+            custom_output=custom_output,
+            stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

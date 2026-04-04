@@ -1652,6 +1652,7 @@ class Bagel(nn.Module):
         cfg_img_past_key_values: NaiveCache | None = None,
         cfg_img_key_values_lens: torch.IntTensor | None = None,
         cfg_img_packed_key_value_indexes: torch.LongTensor | None = None,
+        return_trajectory_latents: bool = False,
     ):
         x_t = packed_init_noises
 
@@ -1659,6 +1660,10 @@ class Bagel(nn.Module):
         timesteps = timestep_shift * timesteps / (1 + (timestep_shift - 1) * timesteps)
         dts = timesteps[:-1] - timesteps[1:]
         timesteps = timesteps[:-1]
+
+        # Optional trajectory recording for RL rollout data collection
+        traj_latents: list[torch.Tensor] = []
+        traj_timesteps: list[torch.Tensor] = []
 
         use_cfg_text = cfg_text_scale > 1.0
         use_cfg_img = cfg_img_scale > 1.0
@@ -1696,6 +1701,7 @@ class Bagel(nn.Module):
                 cfg_img_past_key_values=cfg_img_past_key_values,
                 cfg_img_key_values_lens=cfg_img_key_values_lens,
                 cfg_img_packed_key_value_indexes=cfg_img_packed_key_value_indexes,
+                return_trajectory_latents=return_trajectory_latents,
             )
 
         # ── SP + CFG: sequential single-branch forwards ──
@@ -1756,9 +1762,12 @@ class Bagel(nn.Module):
                     )
 
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
+                if return_trajectory_latents:
+                    traj_latents.append(x_t.clone())
+                    traj_timesteps.append(timesteps[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-            return unpacked_latent
+            return unpacked_latent, traj_latents or None, traj_timesteps or None
 
         # ── SP without CFG: direct single-branch loop ──
         if use_sp:
@@ -1779,9 +1788,12 @@ class Bagel(nn.Module):
                     packed_key_value_indexes=packed_key_value_indexes,
                 )
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
+                if return_trajectory_latents:
+                    traj_latents.append(x_t.clone())
+                    traj_timesteps.append(timesteps[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-            return unpacked_latent
+            return unpacked_latent, traj_latents or None, traj_timesteps or None
 
         # ── Batched CFG mode (cfg_parallel_size=1, no SP) ──
         cfg_batched = None
@@ -1868,9 +1880,12 @@ class Bagel(nn.Module):
             )
 
             x_t = x_t - v_t.to(x_t.device) * dts[i]  # velocity pointing from data to noise
+            if return_trajectory_latents:
+                traj_latents.append(x_t.clone())
+                traj_timesteps.append(timesteps[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-        return unpacked_latent
+        return unpacked_latent, traj_latents or None, traj_timesteps or None
 
     def _generate_image_parallel(
         self,
@@ -1902,6 +1917,7 @@ class Bagel(nn.Module):
         cfg_img_past_key_values: NaiveCache | None,
         cfg_img_key_values_lens: torch.IntTensor | None,
         cfg_img_packed_key_value_indexes: torch.LongTensor | None,
+        return_trajectory_latents: bool = False,
     ):
         """CFG parallel denoising loop: each rank computes one CFG branch.
 
@@ -1958,6 +1974,9 @@ class Bagel(nn.Module):
         else:
             raise RuntimeError(f"Unexpected cfg_rank={cfg_rank} for Bagel 3-branch CFG parallel")
 
+        traj_latents: list[torch.Tensor] = []
+        traj_timesteps: list[torch.Tensor] = []
+
         for i, t in enumerate(timesteps):
             timestep = torch.tensor([t] * x_t.shape[0], device=x_t.device)
             use_cfg_this_step = t > cfg_interval[0] and t <= cfg_interval[1] and cfg_text_scale > 1.0
@@ -2007,9 +2026,12 @@ class Bagel(nn.Module):
                 )
 
             x_t = x_t - v_t.to(x_t.device) * dts[i]
+            if return_trajectory_latents:
+                traj_latents.append(x_t.clone())
+                traj_timesteps.append(timesteps[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-        return unpacked_latent
+        return unpacked_latent, traj_latents or None, traj_timesteps or None
 
     @staticmethod
     def _combine_cfg(
