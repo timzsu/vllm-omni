@@ -76,38 +76,38 @@ class TestTrajectoryRecording:
         bagel = _make_mock_bagel()
         args = _make_generate_args()
 
-        unpacked, traj_latents, traj_timesteps = bagel.generate_image(
+        unpacked, trajectory_latents, trajectory_timesteps = bagel.generate_image(
             **args, return_trajectory_latents=False
         )
 
         assert isinstance(unpacked, (list, tuple))
         assert len(unpacked) == 1  # one sequence
-        assert traj_latents is None
-        assert traj_timesteps is None
+        assert trajectory_latents is None
+        assert trajectory_timesteps is None
 
     def test_trajectory_enabled_returns_correct_count(self, _mock_cfg_ws):
         bagel = _make_mock_bagel()
         args = _make_generate_args()
 
-        _, traj_latents, traj_timesteps = bagel.generate_image(
+        _, trajectory_latents, trajectory_timesteps = bagel.generate_image(
             **args, return_trajectory_latents=True
         )
 
-        assert traj_latents is not None
-        assert traj_timesteps is not None
-        assert len(traj_latents) == EXPECTED_STEPS
-        assert len(traj_timesteps) == EXPECTED_STEPS
+        assert trajectory_latents is not None
+        assert trajectory_timesteps is not None
+        assert len(trajectory_latents) == EXPECTED_STEPS
+        assert len(trajectory_timesteps) == EXPECTED_STEPS
 
     def test_trajectory_latents_shape_matches_input(self, _mock_cfg_ws):
         bagel = _make_mock_bagel()
         args = _make_generate_args()
         expected_shape = args["packed_init_noises"].shape
 
-        _, traj_latents, _ = bagel.generate_image(
+        _, trajectory_latents, _ = bagel.generate_image(
             **args, return_trajectory_latents=True
         )
 
-        for i, lat in enumerate(traj_latents):
+        for i, lat in enumerate(trajectory_latents):
             assert lat.shape == expected_shape, (
                 f"Step {i}: expected {expected_shape}, got {lat.shape}"
             )
@@ -116,12 +116,12 @@ class TestTrajectoryRecording:
         bagel = _make_mock_bagel()
         args = _make_generate_args()
 
-        _, traj_latents, _ = bagel.generate_image(
+        _, trajectory_latents, _ = bagel.generate_image(
             **args, return_trajectory_latents=True
         )
 
-        for i in range(1, len(traj_latents)):
-            assert not torch.equal(traj_latents[i], traj_latents[i - 1]), (
+        for i in range(1, len(trajectory_latents)):
+            assert not torch.equal(trajectory_latents[i], trajectory_latents[i - 1]), (
                 f"Steps {i - 1} and {i} should differ"
             )
 
@@ -129,26 +129,26 @@ class TestTrajectoryRecording:
         bagel = _make_mock_bagel()
         args = _make_generate_args()
 
-        _, _, traj_timesteps = bagel.generate_image(
+        _, _, trajectory_timesteps = bagel.generate_image(
             **args, return_trajectory_latents=True
         )
 
-        for i in range(1, len(traj_timesteps)):
-            assert traj_timesteps[i] < traj_timesteps[i - 1], (
-                f"Timestep {i} ({traj_timesteps[i]:.4f}) should be less than "
-                f"timestep {i - 1} ({traj_timesteps[i - 1]:.4f})"
+        for i in range(1, len(trajectory_timesteps)):
+            assert trajectory_timesteps[i] < trajectory_timesteps[i - 1], (
+                f"Timestep {i} ({trajectory_timesteps[i]:.4f}) should be less than "
+                f"timestep {i - 1} ({trajectory_timesteps[i - 1]:.4f})"
             )
 
     def test_trajectory_final_latent_matches_output(self, _mock_cfg_ws):
         bagel = _make_mock_bagel()
         args = _make_generate_args()
 
-        unpacked, traj_latents, _ = bagel.generate_image(
+        unpacked, trajectory_latents, _ = bagel.generate_image(
             **args, return_trajectory_latents=True
         )
 
         # Reconstruct the full final latent from unpacked pieces
         final_latent = torch.cat(unpacked, dim=0)
-        assert torch.allclose(traj_latents[-1], final_latent, atol=1e-6), (
+        assert torch.allclose(trajectory_latents[-1], final_latent, atol=1e-6), (
             "Last trajectory latent should match the final output"
         )

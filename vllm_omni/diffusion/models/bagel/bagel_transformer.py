@@ -1662,8 +1662,8 @@ class Bagel(nn.Module):
         timesteps = timesteps[:-1]
 
         # Optional trajectory recording for RL rollout data collection
-        traj_latents: list[torch.Tensor] = []
-        traj_timesteps: list[torch.Tensor] = []
+        trajectory_latents: list[torch.Tensor] | None = [] if return_trajectory_latents else None
+        trajectory_timesteps: list[torch.Tensor] | None = [] if return_trajectory_latents else None
 
         use_cfg_text = cfg_text_scale > 1.0
         use_cfg_img = cfg_img_scale > 1.0
@@ -1763,11 +1763,11 @@ class Bagel(nn.Module):
 
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
                 if return_trajectory_latents:
-                    traj_latents.append(x_t.clone())
-                    traj_timesteps.append(timesteps[i])
+                    trajectory_latents.append(x_t.clone())
+                    trajectory_timesteps.append(timesteps[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-            return unpacked_latent, traj_latents or None, traj_timesteps or None
+            return unpacked_latent, trajectory_latents, trajectory_timesteps
 
         # ── SP without CFG: direct single-branch loop ──
         if use_sp:
@@ -1789,11 +1789,11 @@ class Bagel(nn.Module):
                 )
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
                 if return_trajectory_latents:
-                    traj_latents.append(x_t.clone())
-                    traj_timesteps.append(timesteps[i])
+                    trajectory_latents.append(x_t.clone())
+                    trajectory_timesteps.append(timesteps[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-            return unpacked_latent, traj_latents or None, traj_timesteps or None
+            return unpacked_latent, trajectory_latents, trajectory_timesteps
 
         # ── Batched CFG mode (cfg_parallel_size=1, no SP) ──
         cfg_batched = None
@@ -1881,11 +1881,11 @@ class Bagel(nn.Module):
 
             x_t = x_t - v_t.to(x_t.device) * dts[i]  # velocity pointing from data to noise
             if return_trajectory_latents:
-                traj_latents.append(x_t.clone())
-                traj_timesteps.append(timesteps[i])
+                trajectory_latents.append(x_t.clone())
+                trajectory_timesteps.append(timesteps[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-        return unpacked_latent, traj_latents or None, traj_timesteps or None
+        return unpacked_latent, trajectory_latents, trajectory_timesteps
 
     def _generate_image_parallel(
         self,
@@ -1974,8 +1974,8 @@ class Bagel(nn.Module):
         else:
             raise RuntimeError(f"Unexpected cfg_rank={cfg_rank} for Bagel 3-branch CFG parallel")
 
-        traj_latents: list[torch.Tensor] = []
-        traj_timesteps: list[torch.Tensor] = []
+        trajectory_latents: list[torch.Tensor] | None = [] if return_trajectory_latents else None
+        trajectory_timesteps: list[torch.Tensor] | None = [] if return_trajectory_latents else None
 
         for i, t in enumerate(timesteps):
             timestep = torch.tensor([t] * x_t.shape[0], device=x_t.device)
@@ -2027,11 +2027,11 @@ class Bagel(nn.Module):
 
             x_t = x_t - v_t.to(x_t.device) * dts[i]
             if return_trajectory_latents:
-                traj_latents.append(x_t.clone())
-                traj_timesteps.append(timesteps[i])
+                trajectory_latents.append(x_t.clone())
+                trajectory_timesteps.append(timesteps[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
-        return unpacked_latent, traj_latents or None, traj_timesteps or None
+        return unpacked_latent, trajectory_latents, trajectory_timesteps
 
     @staticmethod
     def _combine_cfg(
