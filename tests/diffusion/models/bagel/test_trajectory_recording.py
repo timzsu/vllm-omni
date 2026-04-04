@@ -80,7 +80,7 @@ class TestTrajectoryRecording:
             **args, return_trajectory_latents=False
         )
 
-        assert isinstance(unpacked, list)
+        assert isinstance(unpacked, (list, tuple))
         assert len(unpacked) == 1  # one sequence
         assert traj_latents is None
         assert traj_timesteps is None
