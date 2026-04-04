@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterable
-from typing import Any
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isqrt
@@ -663,8 +662,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
             trajectory_latents_stacked = torch.stack(trajectory_latents)
             if req.sampling_params.return_trajectory_decoded:
                 trajectory_decoded = [
-                    self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape)
-                    for lat in trajectory_latents
+                    self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape) for lat in trajectory_latents
                 ]
 
         return DiffusionOutput(

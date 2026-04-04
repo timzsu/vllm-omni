@@ -58,6 +58,9 @@ class OmniRequestOutput:
     images: list[Image.Image] = field(default_factory=list)
     prompt: OmniPromptType | None = None
     latents: torch.Tensor | None = None
+    trajectory_latents: torch.Tensor | None = None
+    trajectory_timesteps: list[torch.Tensor] | None = None
+    trajectory_decoded: list | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
     _multimodal_output: dict[str, Any] = field(default_factory=dict)
     _custom_output: dict[str, Any] = field(default_factory=dict)
@@ -101,6 +104,9 @@ class OmniRequestOutput:
         prompt: OmniPromptType | None = None,
         metrics: dict[str, Any] | None = None,
         latents: torch.Tensor | None = None,
+        trajectory_latents: torch.Tensor | None = None,
+        trajectory_timesteps: list[torch.Tensor] | None = None,
+        trajectory_decoded: list | None = None,
         multimodal_output: dict[str, Any] | None = None,
         custom_output: dict[str, Any] | None = None,
         final_output_type: str = "image",
@@ -129,6 +135,9 @@ class OmniRequestOutput:
             images=images,
             prompt=prompt,
             latents=latents,
+            trajectory_latents=trajectory_latents,
+            trajectory_timesteps=trajectory_timesteps,
+            trajectory_decoded=trajectory_decoded,
             metrics=metrics or {},
             _multimodal_output=multimodal_output or {},
             _custom_output=custom_output or {},
