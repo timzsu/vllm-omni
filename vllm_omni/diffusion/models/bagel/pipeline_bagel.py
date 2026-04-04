@@ -658,7 +658,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         # Build trajectory output when requested
         trajectory_latents_stacked = None
         trajectory_decoded: list[torch.Tensor] | None = None
-        if trajectory_latents is not None:
+        if trajectory_latents:
             trajectory_latents_stacked = torch.stack(trajectory_latents)
             if req.sampling_params.return_trajectory_decoded:
                 trajectory_decoded = [

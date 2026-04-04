@@ -1764,7 +1764,7 @@ class Bagel(nn.Module):
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
                 if return_trajectory_latents:
                     trajectory_latents.append(x_t.clone())
-                    trajectory_timesteps.append(timesteps[i])
+                    trajectory_timesteps.append(timesteps[i] - dts[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
             return unpacked_latent, trajectory_latents, trajectory_timesteps
@@ -1790,7 +1790,7 @@ class Bagel(nn.Module):
                 x_t = x_t - v_t.to(x_t.device) * dts[i]
                 if return_trajectory_latents:
                     trajectory_latents.append(x_t.clone())
-                    trajectory_timesteps.append(timesteps[i])
+                    trajectory_timesteps.append(timesteps[i] - dts[i])
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
             return unpacked_latent, trajectory_latents, trajectory_timesteps
@@ -1882,7 +1882,7 @@ class Bagel(nn.Module):
             x_t = x_t - v_t.to(x_t.device) * dts[i]  # velocity pointing from data to noise
             if return_trajectory_latents:
                 trajectory_latents.append(x_t.clone())
-                trajectory_timesteps.append(timesteps[i])
+                trajectory_timesteps.append(timesteps[i] - dts[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
         return unpacked_latent, trajectory_latents, trajectory_timesteps
@@ -2028,7 +2028,7 @@ class Bagel(nn.Module):
             x_t = x_t - v_t.to(x_t.device) * dts[i]
             if return_trajectory_latents:
                 trajectory_latents.append(x_t.clone())
-                trajectory_timesteps.append(timesteps[i])
+                trajectory_timesteps.append(timesteps[i] - dts[i])
 
         unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
         return unpacked_latent, trajectory_latents, trajectory_timesteps
