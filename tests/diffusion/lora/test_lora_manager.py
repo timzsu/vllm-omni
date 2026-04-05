@@ -555,3 +555,43 @@ def test_lora_manager_max_rank_validation(monkeypatch, rank):
     req1 = _dummy_lora_request(1)
     with pytest.raises(ValueError):
         manager.add_adapter(req1)
+
+
+def test_lora_manager_discovers_bagel_component(monkeypatch):
+    """Verify that _replace_layers_with_lora finds layers under 'bagel'."""
+    import vllm_omni.diffusion.lora.manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "BaseLayerWithLoRA", _DummyBaseLayerWithLoRA)
+
+    def _fake_from_layer_diffusion(*, layer: torch.nn.Module, **_kwargs):
+        if isinstance(layer, _FakeLinearBase):
+            return _DummyBaseLayerWithLoRA(layer)
+        return layer
+
+    replace_calls: list[str] = []
+
+    def _fake_replace_submodule(root: torch.nn.Module, module_name: str, submodule: torch.nn.Module):
+        replace_calls.append(module_name)
+        setattr(root, module_name, submodule)
+
+    monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer_diffusion)
+    monkeypatch.setattr(manager_mod, "replace_submodule", _fake_replace_submodule)
+
+    # Pipeline with a 'bagel' component (no 'transformer')
+    pipeline = torch.nn.Module()
+    pipeline.bagel = torch.nn.Module()
+    pipeline.bagel.language_model = torch.nn.Module()
+    pipeline.bagel.language_model.qkv_proj = _FakeLinearBase()
+
+    manager = DiffusionLoRAManager(
+        pipeline=pipeline,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+        max_cached_adapters=1,
+    )
+
+    peft_helper = type("_PH", (), {"r": 1})()
+    manager._replace_layers_with_lora(peft_helper)
+
+    assert "language_model.qkv_proj" in replace_calls
+    assert "bagel.language_model.qkv_proj" in manager._lora_modules

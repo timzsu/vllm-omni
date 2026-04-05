@@ -930,6 +930,7 @@ class Qwen2MoTForCausalLM(Qwen2PreTrainedModel):
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
         ]
+        self.stacked_params_mapping = stacked_params_mapping
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 

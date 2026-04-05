@@ -366,7 +366,7 @@ class DiffusionLoRAManager:
             fully_sharded_loras=False,
         )
 
-        for component_name in ("transformer", "transformer_2", "dit"):
+        for component_name in ("transformer", "transformer_2", "dit", "bagel"):
             if not hasattr(self.pipeline, component_name):
                 continue
             component = getattr(self.pipeline, component_name)
