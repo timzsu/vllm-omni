@@ -373,6 +373,10 @@ class DiffusionLoRAManager:
             if not isinstance(component, nn.Module):
                 continue
 
+            # Collect replacements first to avoid mutating the module tree
+            # while iterating over named_modules().
+            pending_replacements: list[tuple[str, str, nn.Module, list[str]]] = []
+
             for module_name, module in component.named_modules(remove_duplicate=False):
                 # Don't recurse into already-replaced LoRA wrappers. Their
                 # original LinearBase lives under "base_layer", and replacing
@@ -401,6 +405,9 @@ class DiffusionLoRAManager:
                     if not should_replace:
                         continue
 
+                pending_replacements.append((module_name, full_module_name, module, packed_modules_list))
+
+            for module_name, full_module_name, module, packed_modules_list in pending_replacements:
                 lora_layer = from_layer_diffusion(
                     layer=module,
                     max_loras=1,
