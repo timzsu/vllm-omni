@@ -28,6 +28,7 @@ from vllm_omni.diffusion.lora.utils import (
     _match_target_modules,
     from_layer_diffusion,
 )
+from vllm_omni.lora.tensor_lora_request import TensorLoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 logger = init_logger(__name__)
@@ -210,11 +211,16 @@ class DiffusionLoRAManager:
             return None
         return sub_suffixes
 
-    def set_active_adapter(self, lora_request: LoRARequest | None, lora_scale: float = 1.0) -> None:
+    def set_active_adapter(
+        self,
+        lora_request: LoRARequest | TensorLoRARequest | None,
+        lora_scale: float = 1.0,
+    ) -> None:
         """Set the active LoRA adapter for the pipeline.
 
         Args:
-            lora_request: The LoRA request, or None to deactivate all adapters.
+            lora_request: The LoRA request (file-backed or tensor-backed),
+                or None to deactivate all adapters.
             lora_scale: The external scale for the LoRA adapter.
         """
         if lora_request is None:
@@ -233,11 +239,12 @@ class DiffusionLoRAManager:
             return
 
         adapter_id = lora_request.lora_int_id
+        lora_path = getattr(lora_request, "lora_path", "<tensors>")
         logger.debug(
             "Setting active adapter: id=%d, name=%s, path=%s, scale=%.2f, cache_size=%d/%d",
             adapter_id,
             lora_request.lora_name,
-            lora_request.lora_path,
+            lora_path,
             lora_scale,
             len(self._registered_adapters),
             self.max_cached_adapters,
@@ -318,6 +325,53 @@ class DiffusionLoRAManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()  # ref: _create_merged_loras_inplace, internal scaling
+
+        return lora_model, peft_helper
+
+    def _load_adapter_from_tensors(
+        self,
+        request: TensorLoRARequest,
+    ) -> tuple[LoRAModel, PEFTHelper]:
+        """Build a LoRAModel directly from in-memory tensors (no disk I/O).
+
+        Used by VeRL and similar RL training loops that keep LoRA weights
+        in GPU/CPU memory and push them after each gradient step.
+        """
+        if not self._expected_lora_modules:
+            raise ValueError("No supported LoRA modules found in the diffusion pipeline.")
+
+        peft_helper = PEFTHelper(
+            r=request.rank,
+            lora_alpha=request.lora_alpha,
+            target_modules=list(request.target_modules) if request.target_modules else [],
+        )
+
+        loras: dict[str, LoRALayerWeights] = {}
+        for module_name, (lora_a, lora_b) in request.lora_tensors.items():
+            loras[module_name] = LoRALayerWeights(
+                module_name=module_name,
+                rank=request.rank,
+                lora_alpha=request.lora_alpha,
+                lora_a=lora_a.to(dtype=self.dtype, device="cpu"),
+                lora_b=lora_b.to(dtype=self.dtype, device="cpu"),
+            )
+
+        lora_model = LoRAModel(
+            lora_model_id=request.lora_int_id,
+            rank=request.rank,
+            loras=loras,
+        )
+
+        logger.info(
+            "Built LoRA model from tensors: id=%d, rank=%d, num_modules=%d, modules=%s",
+            lora_model.id,
+            request.rank,
+            len(lora_model.loras),
+            list(lora_model.loras.keys()),
+        )
+
+        for lora in lora_model.loras.values():
+            lora.optimize()
 
         return lora_model, peft_helper
 
@@ -650,7 +704,7 @@ class DiffusionLoRAManager:
             )
             self.remove_adapter(lru_adapter_id)
 
-    def add_adapter(self, lora_request: LoRARequest) -> bool:
+    def add_adapter(self, lora_request: LoRARequest | TensorLoRARequest) -> bool:
         """
         Add a new adapter to the cache without activating it.
         """
@@ -666,7 +720,10 @@ class DiffusionLoRAManager:
         # so that we don't go over capacity on the new load
         self._evict_for_new_adapter()
 
-        lora_model, peft_helper = self._load_adapter(lora_request)
+        if isinstance(lora_request, TensorLoRARequest):
+            lora_model, peft_helper = self._load_adapter_from_tensors(lora_request)
+        else:
+            lora_model, peft_helper = self._load_adapter(lora_request)
         self._touch_adapter_info(adapter_id)
 
         self._registered_adapters[adapter_id] = lora_model
