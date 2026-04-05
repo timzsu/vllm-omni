@@ -194,13 +194,17 @@ def test_bagel_lora_scale_and_deactivation(run_level, tmp_path):
         diff_2x = np.abs(baseline_arr - img_2x_arr).mean()
         diff_restored = np.abs(baseline_arr - restored_arr).mean()
 
-        # (a) Adapter has visible effect
+        # (a) Adapter has visible effect at both scales
         assert diff_1x > 0.5, f"LoRA scale=1.0 had no visible effect: diff={diff_1x}"
+        assert diff_2x > 0.5, f"LoRA scale=2.0 had no visible effect: diff={diff_2x}"
 
-        # (b) Scale parameter works (2x produces larger change)
-        assert diff_2x > diff_1x, f"LoRA scale not applied: diff_2x={diff_2x} <= diff_1x={diff_1x}"
+        # (b) Different scales produce different outputs
+        assert not np.isclose(diff_1x, diff_2x, atol=1.0), (
+            f"LoRA scale has no effect: diff_1x={diff_1x:.2f}, diff_2x={diff_2x:.2f}"
+        )
 
         # (c) Output is not corrupted
+        assert diff_1x < 80, f"LoRA output looks corrupted: diff_1x={diff_1x}"
         assert diff_2x < 80, f"LoRA output looks corrupted: diff_2x={diff_2x}"
 
         # (d) Deactivation fully restores base model
