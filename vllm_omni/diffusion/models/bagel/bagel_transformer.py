@@ -1804,8 +1804,9 @@ class Bagel(nn.Module):
                 if scheduler is not None:
                     out = scheduler.step(v_t.to(x_t.device), timesteps[i], x_t, dts[i], **_sched_kw)
                     x_t = out.prev_sample
-                    if trajectory_log_probs is not None and out.log_prob is not None:
-                        trajectory_log_probs.append(out.log_prob)
+                    out_log_prob = getattr(out, "log_prob", None)
+                    if trajectory_log_probs is not None and out_log_prob is not None:
+                        trajectory_log_probs.append(out_log_prob)
                 else:
                     x_t = x_t - v_t.to(x_t.device) * dts[i]
                 if return_trajectory_latents:
