@@ -6,23 +6,17 @@ from __future__ import annotations
 
 import pytest
 import torch
-from vllm.model_executor.layers.linear import LinearBase
 
+from tests.diffusion.lora.conftest import (
+    DummyBaseLayerWithLoRA,
+    FakeLinearBase,
+    fake_replace_submodule,
+)
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _FakeLinearBase(LinearBase):
-    """Minimal LinearBase stub for LoRA layer discovery."""
-
-    def __init__(self):
-        torch.nn.Module.__init__(self)
+_FakeLinearBase = FakeLinearBase
 
 
 # ---------------------------------------------------------------------------
@@ -105,27 +99,20 @@ class TestStage1DiTLoRA:
     def test_diffusion_lora_manager_replaces_bagel_packed_layer_via_sublayer_target(self, monkeypatch):
         """Targeting sublayer 'q_proj' should replace the fused 'qkv_proj' under bagel."""
         import vllm_omni.diffusion.lora.manager as manager_mod
-        from tests.diffusion.lora.test_lora_manager import (
-            _DummyBaseLayerWithLoRA,
-        )
 
-        monkeypatch.setattr(manager_mod, "BaseLayerWithLoRA", _DummyBaseLayerWithLoRA)
+        monkeypatch.setattr(manager_mod, "BaseLayerWithLoRA", DummyBaseLayerWithLoRA)
 
         def _fake_from_layer_diffusion(*, layer, **_kwargs):
-            return _DummyBaseLayerWithLoRA(layer)
+            return DummyBaseLayerWithLoRA(layer)
 
         replace_calls: list[str] = []
 
-        def _fake_replace_submodule(root, module_name, submodule):
-            replace_calls.append(module_name)
-            parts = module_name.split(".")
-            parent = root
-            for attr in parts[:-1]:
-                parent = getattr(parent, attr)
-            setattr(parent, parts[-1], submodule)
-
         monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer_diffusion)
-        monkeypatch.setattr(manager_mod, "replace_submodule", _fake_replace_submodule)
+        monkeypatch.setattr(
+            manager_mod,
+            "replace_submodule",
+            lambda root, name, sub: fake_replace_submodule(root, name, sub, replace_calls),
+        )
 
         # Build pipeline with bagel component
         pipeline = torch.nn.Module()
@@ -157,4 +144,4 @@ class TestStage1DiTLoRA:
         assert "language_model.attn.qkv_proj" in replace_calls
         assert "bagel.language_model.attn.qkv_proj" in manager._lora_modules
         # Verify the module was actually replaced in the tree (not just recorded)
-        assert isinstance(pipeline.bagel.language_model.attn.qkv_proj, _DummyBaseLayerWithLoRA)
+        assert isinstance(pipeline.bagel.language_model.attn.qkv_proj, DummyBaseLayerWithLoRA)

@@ -7,8 +7,12 @@ import pytest
 import torch
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.utils import get_supported_lora_modules
-from vllm.model_executor.layers.linear import LinearBase
 
+from tests.diffusion.lora.conftest import (
+    DummyBaseLayerWithLoRA,
+    FakeLinearBase,
+    fake_replace_submodule,
+)
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
 from vllm_omni.lora.request import LoRARequest
 
@@ -33,35 +37,9 @@ class _DummyLoRALayer:
         self.reset_calls += 1
 
 
-class _FakeLinearBase(LinearBase):
-    def __init__(self):
-        torch.nn.Module.__init__(self)
-
-
-class _DummyBaseLayerWithLoRA(torch.nn.Module):
-    def __init__(self, base_layer: torch.nn.Module):
-        super().__init__()
-        self.base_layer = base_layer
-
-        self.set_calls: list[
-            tuple[list[torch.Tensor | None] | torch.Tensor, list[torch.Tensor | None] | torch.Tensor]
-        ] = []
-        self.reset_calls: int = 0
-        self.create_calls: int = 0
-
-    def set_lora(self, index: int, lora_a, lora_b):
-        assert index == 0
-        self.set_calls.append((lora_a, lora_b))
-
-    def reset_lora(self, index: int):
-        assert index == 0
-        self.reset_calls += 1
-
-    def create_lora_weights(self, max_loras, lora_config, model_config):
-        # Needs to be callable for scale test when rank changes, but not
-        # actually used since we mock everything and check everything based
-        # on set calls.
-        self.create_calls += 1
+# Aliases for backward compatibility within this file
+_FakeLinearBase = FakeLinearBase
+_DummyBaseLayerWithLoRA = DummyBaseLayerWithLoRA
 
 
 class _DummyPipeline(torch.nn.Module):
@@ -570,16 +548,12 @@ def test_lora_manager_discovers_bagel_component(monkeypatch):
 
     replace_calls: list[str] = []
 
-    def _fake_replace_submodule(root: torch.nn.Module, module_name: str, submodule: torch.nn.Module):
-        replace_calls.append(module_name)
-        parts = module_name.split(".")
-        parent = root
-        for attr in parts[:-1]:
-            parent = getattr(parent, attr)
-        setattr(parent, parts[-1], submodule)
-
     monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer_diffusion)
-    monkeypatch.setattr(manager_mod, "replace_submodule", _fake_replace_submodule)
+    monkeypatch.setattr(
+        manager_mod,
+        "replace_submodule",
+        lambda root, name, sub: fake_replace_submodule(root, name, sub, replace_calls),
+    )
 
     # Pipeline with a 'bagel' component (no 'transformer')
     pipeline = torch.nn.Module()
