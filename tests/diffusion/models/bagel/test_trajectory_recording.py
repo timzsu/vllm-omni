@@ -3,6 +3,7 @@
 """Unit tests for BAGEL trajectory recording in the denoising loop."""
 
 import types
+from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -161,3 +162,75 @@ class TestTrajectoryRecording:
         assert torch.allclose(trajectory_latents[-1], final_latent, atol=1e-6), (
             "Last trajectory latent should match the final output"
         )
+
+
+# ---------------------------------------------------------------------------
+# Mock scheduler for log-prob tests
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _MockStepOutput:
+    prev_sample: torch.Tensor
+    log_prob: torch.Tensor
+
+
+class _MockScheduler:
+    """Minimal scheduler: Euler step + constant log-prob per step."""
+
+    def step(self, model_output, sigma, sample, dt, **kwargs):
+        prev_sample = sample - model_output * dt
+        log_prob = torch.tensor(-1.0)
+        return _MockStepOutput(prev_sample=prev_sample, log_prob=log_prob)
+
+
+class TestTrajectoryLogProbs:
+    """Tests for log-prob recording when a scheduler is provided."""
+
+    @pytest.fixture()
+    def bagel_scheduler_args(self):
+        with patch(
+            "vllm_omni.diffusion.models.bagel.bagel_transformer.get_classifier_free_guidance_world_size",
+            return_value=1,
+        ):
+            yield _make_mock_bagel(), _make_generate_args(), _MockScheduler()
+
+    def test_log_probs_recorded_with_scheduler(self, bagel_scheduler_args):
+        bagel, args, scheduler = bagel_scheduler_args
+
+        _, _, _, trajectory_log_probs = bagel.generate_image(
+            **args, return_trajectory_latents=True, scheduler=scheduler
+        )
+
+        assert trajectory_log_probs is not None
+        assert len(trajectory_log_probs) == EXPECTED_STEPS
+
+    def test_log_probs_are_finite(self, bagel_scheduler_args):
+        bagel, args, scheduler = bagel_scheduler_args
+
+        _, _, _, trajectory_log_probs = bagel.generate_image(
+            **args, return_trajectory_latents=True, scheduler=scheduler
+        )
+
+        for i, lp in enumerate(trajectory_log_probs):
+            assert torch.isfinite(lp).all(), f"Step {i}: log_prob is not finite"
+
+    def test_log_probs_none_without_scheduler(self, bagel_scheduler_args):
+        bagel, args, _ = bagel_scheduler_args
+
+        _, _, _, trajectory_log_probs = bagel.generate_image(**args, return_trajectory_latents=True, scheduler=None)
+
+        assert trajectory_log_probs is None
+
+    def test_scheduler_updates_latents(self, bagel_scheduler_args):
+        """Verify the scheduler's prev_sample is used (not the raw Euler step)."""
+        bagel, args, scheduler = bagel_scheduler_args
+
+        _, traj_with_sched, *_ = bagel.generate_image(**args, return_trajectory_latents=True, scheduler=scheduler)
+        _, traj_without, *_ = bagel.generate_image(**args, return_trajectory_latents=True, scheduler=None)
+
+        # Mock scheduler does the same Euler step, so latents should match
+        for i in range(len(traj_with_sched)):
+            assert torch.allclose(traj_with_sched[i], traj_without[i], atol=1e-5), (
+                f"Step {i}: scheduler and ODE paths should produce same latents"
+            )

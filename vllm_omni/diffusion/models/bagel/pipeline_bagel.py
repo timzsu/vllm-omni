@@ -159,6 +159,9 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         self.od_config = od_config
         self.device = get_local_device()
 
+        self._scheduler: object | None = None
+        self._scheduler_kwargs: dict = {}
+
         model = od_config.model
         local_files_only = os.path.exists(model)
         if local_files_only:
@@ -651,8 +654,8 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
                 cfg_img_key_values_lens=generation_input_cfg_img["cfg_key_values_lens"],
                 cfg_img_packed_key_value_indexes=generation_input_cfg_img["cfg_packed_key_value_indexes"],
                 return_trajectory_latents=req.sampling_params.return_trajectory_latents,
-                scheduler=getattr(self, "_rl_scheduler", None),
-                scheduler_kwargs=getattr(self, "_rl_scheduler_kwargs", None),
+                scheduler=self._scheduler,
+                scheduler_kwargs=self._scheduler_kwargs,
             )
 
         img = self._decode_image_from_latent(self.bagel, self.vae, latents[0], image_shape)
