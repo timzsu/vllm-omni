@@ -4,8 +4,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from tests.diffusion.lora.conftest import (
     DummyBaseLayerWithLoRA,
@@ -13,6 +17,7 @@ from tests.diffusion.lora.conftest import (
     fake_replace_submodule,
 )
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
+from vllm_omni.lora.request import LoRARequest
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -145,3 +150,96 @@ class TestStage1DiTLoRA:
         assert "bagel.language_model.attn.qkv_proj" in manager._lora_modules
         # Verify the module was actually replaced in the tree (not just recorded)
         assert isinstance(pipeline.bagel.language_model.attn.qkv_proj, DummyBaseLayerWithLoRA)
+
+
+# ---------------------------------------------------------------------------
+# Round-trip: synthetic checkpoint → set_active_adapter → verify weights
+# ---------------------------------------------------------------------------
+
+
+def _write_synthetic_lora(
+    adapter_dir: Path,
+    module_name: str,
+    rank: int,
+    in_dim: int,
+    out_dim: int,
+) -> str:
+    """Write a minimal LoRA adapter (safetensors + config) to *adapter_dir*."""
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    lora_a = torch.ones((rank, in_dim), dtype=torch.float32)
+    lora_b = torch.ones((out_dim, rank), dtype=torch.float32) * 2.0
+    save_file(
+        {
+            f"base_model.model.{module_name}.lora_A.weight": lora_a,
+            f"base_model.model.{module_name}.lora_B.weight": lora_b,
+        },
+        str(adapter_dir / "adapter_model.safetensors"),
+    )
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps({"r": rank, "lora_alpha": rank, "target_modules": [module_name]}),
+        encoding="utf-8",
+    )
+    return str(adapter_dir)
+
+
+class TestBagelLoRARoundTrip:
+    """End-to-end: synthetic checkpoint → load → activate → verify weights in fused layer."""
+
+    def test_set_active_adapter_loads_and_activates_bagel_lora(self, tmp_path, monkeypatch):
+        """Full round-trip through set_active_adapter for a bagel component module."""
+        import vllm_omni.diffusion.lora.manager as manager_mod
+
+        monkeypatch.setattr(manager_mod, "BaseLayerWithLoRA", DummyBaseLayerWithLoRA)
+
+        # Build pipeline with bagel.language_model.foo (simple non-packed layer)
+        pipeline = torch.nn.Module()
+        pipeline.bagel = torch.nn.Module()
+        lm = torch.nn.Module()
+        lm.foo = _FakeLinearBase()
+        pipeline.bagel.language_model = lm
+
+        def _fake_from_layer(*, layer, **_kwargs):
+            if isinstance(layer, FakeLinearBase):
+                return DummyBaseLayerWithLoRA(layer)
+            return layer
+
+        monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer)
+        monkeypatch.setattr(
+            manager_mod,
+            "replace_submodule",
+            lambda root, name, sub: fake_replace_submodule(root, name, sub),
+        )
+
+        manager = DiffusionLoRAManager(
+            pipeline=pipeline,
+            device=torch.device("cpu"),
+            dtype=torch.bfloat16,
+            max_cached_adapters=1,
+        )
+
+        # Write synthetic adapter targeting bagel.language_model.foo
+        module_name = "bagel.language_model.foo"
+        rank = 2
+        in_dim = 4
+        out_dim = 4
+        lora_dir = _write_synthetic_lora(tmp_path / "lora", module_name, rank, in_dim, out_dim)
+
+        lora_request = LoRARequest(
+            lora_name="test_bagel",
+            lora_int_id=42,
+            lora_path=lora_dir,
+        )
+
+        # Full round-trip: load from disk → replace layer → activate weights
+        manager.set_active_adapter(lora_request, lora_scale=0.5)
+
+        # Verify the layer was replaced and weights were set
+        replaced_layer = pipeline.bagel.language_model.foo
+        assert isinstance(replaced_layer, DummyBaseLayerWithLoRA), "Layer should be wrapped with LoRA"
+        assert len(replaced_layer.set_calls) == 1, "set_lora should have been called once"
+
+        lora_a, lora_b = replaced_layer.set_calls[0]
+        # A weights should be ones (as written)
+        assert torch.all(lora_a == 1.0), f"lora_a should be all ones, got {lora_a}"
+        # B weights should be 2.0 * scale(0.5) = 1.0
+        assert torch.allclose(lora_b, torch.ones_like(lora_b)), f"lora_b should be 2.0 * 0.5 = 1.0, got {lora_b}"
