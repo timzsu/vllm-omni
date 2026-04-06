@@ -572,7 +572,11 @@ def test_lora_manager_discovers_bagel_component(monkeypatch):
 
     def _fake_replace_submodule(root: torch.nn.Module, module_name: str, submodule: torch.nn.Module):
         replace_calls.append(module_name)
-        setattr(root, module_name, submodule)
+        parts = module_name.split(".")
+        parent = root
+        for attr in parts[:-1]:
+            parent = getattr(parent, attr)
+        setattr(parent, parts[-1], submodule)
 
     monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer_diffusion)
     monkeypatch.setattr(manager_mod, "replace_submodule", _fake_replace_submodule)
@@ -595,3 +599,5 @@ def test_lora_manager_discovers_bagel_component(monkeypatch):
 
     assert "language_model.qkv_proj" in replace_calls
     assert "bagel.language_model.qkv_proj" in manager._lora_modules
+    # Verify the module was actually replaced in the tree (not just recorded)
+    assert isinstance(pipeline.bagel.language_model.qkv_proj, _DummyBaseLayerWithLoRA)

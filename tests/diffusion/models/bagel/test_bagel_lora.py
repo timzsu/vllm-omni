@@ -118,7 +118,11 @@ class TestStage1DiTLoRA:
 
         def _fake_replace_submodule(root, module_name, submodule):
             replace_calls.append(module_name)
-            setattr(root, module_name, submodule)
+            parts = module_name.split(".")
+            parent = root
+            for attr in parts[:-1]:
+                parent = getattr(parent, attr)
+            setattr(parent, parts[-1], submodule)
 
         monkeypatch.setattr(manager_mod, "from_layer_diffusion", _fake_from_layer_diffusion)
         monkeypatch.setattr(manager_mod, "replace_submodule", _fake_replace_submodule)
@@ -152,3 +156,5 @@ class TestStage1DiTLoRA:
 
         assert "language_model.attn.qkv_proj" in replace_calls
         assert "bagel.language_model.attn.qkv_proj" in manager._lora_modules
+        # Verify the module was actually replaced in the tree (not just recorded)
+        assert isinstance(pipeline.bagel.language_model.attn.qkv_proj, _DummyBaseLayerWithLoRA)
