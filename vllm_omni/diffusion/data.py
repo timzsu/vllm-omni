@@ -702,10 +702,11 @@ class DiffusionOutput:
     Final output (after pipeline completion)
     """
 
-    output: torch.Tensor | None = None
-    trajectory_timesteps: torch.Tensor | None = None
-    trajectory_latents: torch.Tensor | None = None
-    trajectory_log_probs: torch.Tensor | None = None
+    # Fields may be replaced with SHM handle dicts by ipc.pack_diffusion_output_shm
+    output: torch.Tensor | dict | None = None
+    trajectory_timesteps: torch.Tensor | dict | None = None
+    trajectory_latents: torch.Tensor | dict | None = None
+    trajectory_log_probs: torch.Tensor | dict | None = None
     trajectory_decoded: list[Image.Image] | None = None
     error: str | None = None
     aborted: bool = False
