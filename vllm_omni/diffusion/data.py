@@ -705,6 +705,7 @@ class DiffusionOutput:
     output: torch.Tensor | None = None
     trajectory_timesteps: torch.Tensor | None = None
     trajectory_latents: torch.Tensor | None = None
+    trajectory_log_probs: torch.Tensor | None = None
     trajectory_decoded: list[Image.Image] | None = None
     error: str | None = None
     aborted: bool = False

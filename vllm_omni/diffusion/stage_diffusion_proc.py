@@ -181,6 +181,7 @@ class StageDiffusionProc:
         latents = None
         trajectory_latents: list[torch.Tensor] | None = None
         trajectory_timesteps: list[torch.Tensor] | None = None
+        trajectory_log_probs: torch.Tensor | None = None
         trajectory_decoded: list[Image.Image] | None = None
         final_output_type = "image"
 
@@ -197,6 +198,8 @@ class StageDiffusionProc:
                 trajectory_latents = r.trajectory_latents
             if trajectory_timesteps is None:
                 trajectory_timesteps = r.trajectory_timesteps
+            if trajectory_log_probs is None:
+                trajectory_log_probs = r.trajectory_log_probs
             if trajectory_decoded is None:
                 trajectory_decoded = r.trajectory_decoded
             if r.final_output_type != "image":
@@ -210,6 +213,7 @@ class StageDiffusionProc:
             latents=latents,
             trajectory_latents=trajectory_latents,
             trajectory_timesteps=trajectory_timesteps,
+            trajectory_log_probs=trajectory_log_probs,
             trajectory_decoded=trajectory_decoded,
             custom_output=merged_custom or None,
             multimodal_output=merged_mm or None,
