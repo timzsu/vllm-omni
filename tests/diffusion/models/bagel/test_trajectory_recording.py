@@ -40,10 +40,14 @@ def _make_mock_bagel():
     return mock
 
 
-def _make_generate_args(num_tokens=NUM_TOKENS, hidden_dim=HIDDEN_DIM):
-    """Minimal tensor arguments for generate_image (no-CFG path)."""
+def _make_generate_args(num_tokens=NUM_TOKENS, hidden_dim=HIDDEN_DIM, cfg=False):
+    """Tensor arguments for generate_image.
+
+    Args:
+        cfg: If True, enable batched CFG path (cfg_text_scale > 1.0).
+    """
     seq_len = num_tokens + 2  # packed_seqlens includes 2 extra tokens
-    return dict(
+    base = dict(
         packed_text_ids=torch.zeros(2, dtype=torch.long),
         packed_text_indexes=torch.tensor([0, 1], dtype=torch.long),
         packed_init_noises=torch.randn(num_tokens, hidden_dim),
@@ -57,19 +61,34 @@ def _make_generate_args(num_tokens=NUM_TOKENS, hidden_dim=HIDDEN_DIM):
         packed_key_value_indexes=torch.zeros(0, dtype=torch.long),
         num_timesteps=NUM_TIMESTEPS,
         timestep_shift=1.0,
-        cfg_text_scale=1.0,  # no CFG → simplest code path
+        cfg_text_scale=1.0,
         cfg_img_scale=1.0,
     )
+    if cfg:
+        base |= dict(
+            cfg_text_scale=4.0,
+            cfg_text_packed_query_indexes=torch.arange(seq_len, dtype=torch.long),
+            cfg_text_packed_position_ids=torch.arange(seq_len, dtype=torch.long),
+            cfg_text_past_key_values=NaiveCache(1),
+            cfg_text_key_values_lens=torch.tensor([0], dtype=torch.int),
+            cfg_text_packed_key_value_indexes=torch.zeros(0, dtype=torch.long),
+        )
+    return base
 
 
-@pytest.fixture()
-def bagel_and_args():
-    """Shared mock Bagel instance and generate_image arguments."""
+@pytest.fixture(params=[False, True], ids=["no_cfg", "batched_cfg"])
+def bagel_and_args(request):
+    """Mock Bagel instance and generate_image arguments.
+
+    Parametrized over CFG mode so every test runs on both the no-CFG
+    and batched-CFG code paths.
+    """
+    cfg = request.param
     with patch(
         "vllm_omni.diffusion.models.bagel.bagel_transformer.get_classifier_free_guidance_world_size",
         return_value=1,
     ):
-        yield _make_mock_bagel(), _make_generate_args()
+        yield _make_mock_bagel(), _make_generate_args(cfg=cfg)
 
 
 class TestTrajectoryRecording:
