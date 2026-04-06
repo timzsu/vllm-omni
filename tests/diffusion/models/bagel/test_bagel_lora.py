@@ -83,6 +83,10 @@ class TestStage1DiTLoRA:
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            (".mlp_moe_gen.gate_up_proj", ".mlp_moe_gen.gate_proj", 0),
+            (".mlp_moe_gen.gate_up_proj", ".mlp_moe_gen.up_proj", 1),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
         ]
         pipeline.bagel.language_model = language_model
 
@@ -100,6 +104,9 @@ class TestStage1DiTLoRA:
             "k_proj_moe_gen",
             "v_proj_moe_gen",
         ]
+        # MLP entries are flattened to leaf names (both mlp and mlp_moe_gen
+        # map to the same gate_up_proj suffix)
+        assert mapping["gate_up_proj"] == ["gate_proj", "up_proj"]
 
     def test_diffusion_lora_manager_replaces_bagel_packed_layer_via_sublayer_target(self, monkeypatch):
         """Targeting sublayer 'q_proj' should replace the fused 'qkv_proj' under bagel."""

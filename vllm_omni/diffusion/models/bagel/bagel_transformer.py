@@ -929,6 +929,10 @@ class Qwen2MoTForCausalLM(Qwen2PreTrainedModel):
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            (".mlp_moe_gen.gate_up_proj", ".mlp_moe_gen.gate_proj", 0),
+            (".mlp_moe_gen.gate_up_proj", ".mlp_moe_gen.up_proj", 1),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
         ]
         self.stacked_params_mapping = stacked_params_mapping
         params_dict = dict(self.named_parameters())
