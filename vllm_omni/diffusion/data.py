@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any
 
 import torch
+from PIL import Image
 from pydantic import model_validator
 from typing_extensions import Self
 from vllm.config.utils import config
@@ -704,7 +705,7 @@ class DiffusionOutput:
     output: torch.Tensor | None = None
     trajectory_timesteps: torch.Tensor | None = None
     trajectory_latents: torch.Tensor | None = None
-    trajectory_decoded: list[torch.Tensor] | None = None
+    trajectory_decoded: list[Image.Image] | None = None
     error: str | None = None
     aborted: bool = False
     abort_message: str | None = None
