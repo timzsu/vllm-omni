@@ -630,7 +630,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
             enabled=self.device.type != "cpu",
             dtype=self.od_config.dtype,
         ):
-            latents, trajectory_latents, trajectory_timesteps = self.bagel.generate_image(
+            latents, trajectory_latents, trajectory_timesteps, trajectory_log_probs = self.bagel.generate_image(
                 past_key_values=gen_context["past_key_values"],
                 cfg_text_past_key_values=cfg_text_context["past_key_values"],
                 cfg_img_past_key_values=cfg_img_context["past_key_values"],
@@ -651,6 +651,8 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
                 cfg_img_key_values_lens=generation_input_cfg_img["cfg_key_values_lens"],
                 cfg_img_packed_key_value_indexes=generation_input_cfg_img["cfg_packed_key_value_indexes"],
                 return_trajectory_latents=req.sampling_params.return_trajectory_latents,
+                scheduler=getattr(self, "_rl_scheduler", None),
+                scheduler_kwargs=getattr(self, "_rl_scheduler_kwargs", None),
             )
 
         img = self._decode_image_from_latent(self.bagel, self.vae, latents[0], image_shape)
@@ -667,11 +669,16 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
                     self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape) for lat in trajectory_latents
                 ]
 
+        custom_output: dict = {}
+        if trajectory_log_probs:
+            custom_output["all_log_probs"] = torch.stack(trajectory_log_probs)
+
         return DiffusionOutput(
             output=img,
             trajectory_latents=trajectory_latents_stacked,
             trajectory_timesteps=trajectory_timesteps_stacked,
             trajectory_decoded=trajectory_decoded,
+            custom_output=custom_output,
             stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
         )
 

@@ -97,7 +97,7 @@ class TestTrajectoryRecording:
     def test_trajectory_disabled_returns_none(self, bagel_and_args):
         bagel, args = bagel_and_args
 
-        unpacked, trajectory_latents, trajectory_timesteps = bagel.generate_image(
+        unpacked, trajectory_latents, trajectory_timesteps, trajectory_log_probs = bagel.generate_image(
             **args, return_trajectory_latents=False
         )
 
@@ -105,22 +105,27 @@ class TestTrajectoryRecording:
         assert len(unpacked) == 1  # one sequence
         assert trajectory_latents is None
         assert trajectory_timesteps is None
+        assert trajectory_log_probs is None
 
     def test_trajectory_enabled_returns_correct_count(self, bagel_and_args):
         bagel, args = bagel_and_args
 
-        _, trajectory_latents, trajectory_timesteps = bagel.generate_image(**args, return_trajectory_latents=True)
+        _, trajectory_latents, trajectory_timesteps, trajectory_log_probs = bagel.generate_image(
+            **args, return_trajectory_latents=True
+        )
 
         assert trajectory_latents is not None
         assert trajectory_timesteps is not None
         assert len(trajectory_latents) == EXPECTED_STEPS
         assert len(trajectory_timesteps) == EXPECTED_STEPS
+        # log_probs is None without a scheduler (default ODE path)
+        assert trajectory_log_probs is None
 
     def test_trajectory_latents_shape_matches_input(self, bagel_and_args):
         bagel, args = bagel_and_args
         expected_shape = args["packed_init_noises"].shape
 
-        _, trajectory_latents, _ = bagel.generate_image(**args, return_trajectory_latents=True)
+        _, trajectory_latents, *_ = bagel.generate_image(**args, return_trajectory_latents=True)
 
         for i, lat in enumerate(trajectory_latents):
             assert lat.shape == expected_shape, f"Step {i}: expected {expected_shape}, got {lat.shape}"
@@ -128,7 +133,7 @@ class TestTrajectoryRecording:
     def test_trajectory_latents_are_distinct(self, bagel_and_args):
         bagel, args = bagel_and_args
 
-        _, trajectory_latents, _ = bagel.generate_image(**args, return_trajectory_latents=True)
+        _, trajectory_latents, *_ = bagel.generate_image(**args, return_trajectory_latents=True)
 
         for i in range(1, len(trajectory_latents)):
             assert not torch.equal(trajectory_latents[i], trajectory_latents[i - 1]), (
@@ -138,7 +143,7 @@ class TestTrajectoryRecording:
     def test_trajectory_timesteps_are_decreasing(self, bagel_and_args):
         bagel, args = bagel_and_args
 
-        _, _, trajectory_timesteps = bagel.generate_image(**args, return_trajectory_latents=True)
+        _, _, trajectory_timesteps, _ = bagel.generate_image(**args, return_trajectory_latents=True)
 
         for i in range(1, len(trajectory_timesteps)):
             assert trajectory_timesteps[i] < trajectory_timesteps[i - 1], (
@@ -149,7 +154,7 @@ class TestTrajectoryRecording:
     def test_trajectory_final_latent_matches_output(self, bagel_and_args):
         bagel, args = bagel_and_args
 
-        unpacked, trajectory_latents, _ = bagel.generate_image(**args, return_trajectory_latents=True)
+        unpacked, trajectory_latents, *_ = bagel.generate_image(**args, return_trajectory_latents=True)
 
         # Reconstruct the full final latent from unpacked pieces
         final_latent = torch.cat(unpacked, dim=0)
