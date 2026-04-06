@@ -657,9 +657,11 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
 
         # Build trajectory output when requested
         trajectory_latents_stacked = None
+        trajectory_timesteps_stacked = None
         trajectory_decoded: list[torch.Tensor] | None = None
         if trajectory_latents:
             trajectory_latents_stacked = torch.stack(trajectory_latents)
+            trajectory_timesteps_stacked = torch.stack(trajectory_timesteps)
             if req.sampling_params.return_trajectory_decoded:
                 trajectory_decoded = [
                     self._decode_image_from_latent(self.bagel, self.vae, lat, image_shape) for lat in trajectory_latents
@@ -668,7 +670,7 @@ class BagelPipeline(nn.Module, DiffusionPipelineProfilerMixin):
         return DiffusionOutput(
             output=img,
             trajectory_latents=trajectory_latents_stacked,
-            trajectory_timesteps=trajectory_timesteps,
+            trajectory_timesteps=trajectory_timesteps_stacked,
             trajectory_decoded=trajectory_decoded,
             stage_durations=self.stage_durations if hasattr(self, "stage_durations") else None,
         )
