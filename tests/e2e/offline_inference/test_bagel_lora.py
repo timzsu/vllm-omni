@@ -36,8 +36,17 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 MODEL = "ByteDance-Seed/BAGEL-7B-MoT"
-BAGEL_STAGE_CONFIG = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_ci.yaml")
+BAGEL_STAGE_CONFIG_1GPU = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_ci.yaml")
+BAGEL_STAGE_CONFIG_2GPU = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_2gpu_ci.yaml")
 DEFAULT_PROMPT = "<|im_start|>A cute cat<|im_end|>"
+
+
+def _select_stage_config() -> str:
+    """Pick the 2-GPU config when multiple GPUs are available."""
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if num_gpus >= 2:
+        return BAGEL_STAGE_CONFIG_2GPU
+    return BAGEL_STAGE_CONFIG_1GPU
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +68,7 @@ def _resolve_stage_config(config_path: str, run_level: str) -> str:
     return config_path
 
 
-def _configure_sampling_params(omni: Omni, num_inference_steps: int = 2) -> list:
+def _configure_sampling_params(omni: Omni, num_inference_steps: int = 10) -> list:
     params_list = omni.default_sampling_params_list
     if len(params_list) > 1:
         params_list[1].num_inference_steps = num_inference_steps
@@ -83,6 +92,7 @@ def _extract_generated_image(omni_outputs: list) -> Image.Image | None:
 
 def _generate_bagel_image(omni: Omni) -> Image.Image:
     params_list = _configure_sampling_params(omni)
+    params_list[1].lora_request = None
     outputs = list(
         omni.generate(
             prompts=[{"prompt": DEFAULT_PROMPT, "modalities": ["image"]}],
@@ -114,21 +124,19 @@ def _generate_bagel_image_with_lora(
 
 
 def _write_bagel_lora(adapter_dir: Path) -> str:
-    """Create a synthetic rank-1 LoRA adapter for BAGEL's DiT QKV projection."""
+    """Create a synthetic rank-4 LoRA adapter for BAGEL's DiT QKV projection."""
     adapter_dir.mkdir(parents=True, exist_ok=True)
 
-    # BAGEL hidden_size=4096, 32 heads, head_dim=128
-    dim = 4096
+    # BAGEL uses GQA: hidden_size=3584, 28 Q heads, 4 KV heads, head_dim=128
+    # QKV packed dim = 28*128 + 4*128 + 4*128 = 3584 + 512 + 512 = 4608
+    dim = 3584
+    qkv_dim = 4608
     module_name = "bagel.language_model.model.layers.0.self_attn.qkv_proj"
-    rank = 1
+    rank = 4
 
-    lora_a = torch.zeros((rank, dim), dtype=torch.float32)
-    lora_a[0, 0] = 1.0
+    lora_a = torch.randn((rank, dim), dtype=torch.float32) * 0.1
 
-    # QKVParallelLinear packs (Q, K, V), total out_dim = 3 * dim
-    lora_b = torch.zeros((3 * dim, rank), dtype=torch.float32)
-    # Apply a bounded delta to Q slice only
-    lora_b[:dim, 0] = 0.1
+    lora_b = torch.randn((qkv_dim, rank), dtype=torch.float32) * 0.5
 
     save_file(
         {
@@ -155,7 +163,7 @@ def _write_bagel_lora(adapter_dir: Path) -> str:
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
 def test_bagel_lora_scale_and_deactivation(run_level, tmp_path):
     """Validate LoRA effect, scale linearity, bounded perturbation, and clean deactivation."""
-    config_path = _resolve_stage_config(BAGEL_STAGE_CONFIG, run_level)
+    config_path = _resolve_stage_config(_select_stage_config(), run_level)
     omni = Omni(model=MODEL, stage_configs_path=config_path, stage_init_timeout=300)
     try:
         lora_dir = _write_bagel_lora(tmp_path / "bagel_lora")
