@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import copy
 import dataclasses
 import json
 import os
@@ -674,7 +675,13 @@ class AsyncOmniEngine:
 
         # Propagate top-level lora_request to downstream stages that don't
         # specify their own.  Per-stage lora_request takes precedence.
+        # Deep-copy before mutating to avoid contaminating the shared
+        # default_sampling_params_list across requests.
         if lora_request is not None:
+            effective_sampling_params_list = [
+                copy.deepcopy(sp) if (hasattr(sp, "lora_request") and sp.lora_request is None) else sp
+                for sp in effective_sampling_params_list
+            ]
             for stage_params in effective_sampling_params_list:
                 if hasattr(stage_params, "lora_request") and stage_params.lora_request is None:
                     stage_params.lora_request = lora_request
