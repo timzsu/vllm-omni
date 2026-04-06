@@ -672,6 +672,13 @@ class AsyncOmniEngine:
             )
         params = effective_sampling_params_list[0]
 
+        # Propagate top-level lora_request to downstream stages that don't
+        # specify their own.  Per-stage lora_request takes precedence.
+        if lora_request is not None:
+            for stage_params in effective_sampling_params_list:
+                if hasattr(stage_params, "lora_request") and stage_params.lora_request is None:
+                    stage_params.lora_request = lora_request
+
         # Keep the original prompt for downstream stages (they need the raw
         # dict, e.g. for multi_modal_data).
         original_prompt = prompt
