@@ -28,7 +28,7 @@ from vllm_omni.diffusion.lora.utils import (
     _match_target_modules,
     from_layer_diffusion,
 )
-from vllm_omni.lora.tensor_lora_request import TensorLoRARequest
+from vllm_omni.lora.tensor_lora_request import OmniLoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 logger = init_logger(__name__)
@@ -213,7 +213,7 @@ class DiffusionLoRAManager:
 
     def set_active_adapter(
         self,
-        lora_request: LoRARequest | TensorLoRARequest | None,
+        lora_request: LoRARequest | None,
         lora_scale: float = 1.0,
     ) -> None:
         """Set the active LoRA adapter for the pipeline.
@@ -330,7 +330,7 @@ class DiffusionLoRAManager:
 
     def _load_adapter_from_tensors(
         self,
-        request: TensorLoRARequest,
+        request: OmniLoRARequest,
     ) -> tuple[LoRAModel, PEFTHelper]:
         """Build a LoRAModel directly from in-memory tensors (no disk I/O).
 
@@ -704,7 +704,7 @@ class DiffusionLoRAManager:
             )
             self.remove_adapter(lru_adapter_id)
 
-    def add_adapter(self, lora_request: LoRARequest | TensorLoRARequest) -> bool:
+    def add_adapter(self, lora_request: LoRARequest) -> bool:
         """
         Add a new adapter to the cache without activating it.
         """
@@ -720,7 +720,7 @@ class DiffusionLoRAManager:
         # so that we don't go over capacity on the new load
         self._evict_for_new_adapter()
 
-        if isinstance(lora_request, TensorLoRARequest):
+        if isinstance(lora_request, OmniLoRARequest) and lora_request.lora_tensors is not None:
             lora_model, peft_helper = self._load_adapter_from_tensors(lora_request)
         else:
             lora_model, peft_helper = self._load_adapter(lora_request)

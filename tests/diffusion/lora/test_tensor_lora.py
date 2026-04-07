@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import pytest
 import torch
+from vllm.lora.request import LoRARequest
 
 from vllm_omni.diffusion.lora.manager import DiffusionLoRAManager
-from vllm_omni.lora.tensor_lora_request import TensorLoRARequest
+from vllm_omni.lora.tensor_lora_request import OmniLoRARequest
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -41,7 +42,7 @@ def _make_tensor_request(
     in_dim: int = 8,
     out_dim: int = 4,
     target_modules: list[str] | None = None,
-) -> TensorLoRARequest:
+) -> OmniLoRARequest:
     if module_names is None:
         module_names = ["transformer.foo"]
     tensors: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -49,7 +50,7 @@ def _make_tensor_request(
         lora_a = torch.randn(rank, in_dim)
         lora_b = torch.randn(out_dim, rank)
         tensors[name] = (lora_a, lora_b)
-    return TensorLoRARequest(
+    return OmniLoRARequest(
         lora_name=f"tensor_adapter_{adapter_id}",
         lora_int_id=adapter_id,
         lora_tensors=tensors,
@@ -95,7 +96,7 @@ def test_load_adapter_from_tensors_casts_dtype():
     manager._expected_lora_modules = ["foo"]
 
     # Create float32 tensors
-    request = TensorLoRARequest(
+    request = OmniLoRARequest(
         lora_name="fp32_adapter",
         lora_int_id=1,
         lora_tensors={
@@ -132,7 +133,7 @@ def test_load_adapter_from_tensors_raises_without_expected_modules():
 
 
 def test_add_adapter_dispatches_tensor_request(monkeypatch):
-    """add_adapter should use _load_adapter_from_tensors for TensorLoRARequest."""
+    """add_adapter should use _load_adapter_from_tensors for OmniLoRARequest."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
@@ -142,7 +143,7 @@ def test_add_adapter_dispatches_tensor_request(monkeypatch):
 
     load_calls: list[str] = []
 
-    def _fake_load_tensors(req: TensorLoRARequest):
+    def _fake_load_tensors(req: OmniLoRARequest):
         load_calls.append("tensors")
         lora_model = type("LM", (), {"id": req.lora_int_id})()
         peft_helper = type("PH", (), {"r": req.rank})()
@@ -164,7 +165,7 @@ def test_add_adapter_dispatches_tensor_request(monkeypatch):
 
 
 def test_set_active_adapter_with_tensor_request(monkeypatch):
-    """set_active_adapter should work end-to-end with TensorLoRARequest."""
+    """set_active_adapter should work end-to-end with OmniLoRARequest."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
@@ -180,7 +181,7 @@ def test_set_active_adapter_with_tensor_request(monkeypatch):
     lora_a = torch.ones(rank, in_dim, dtype=torch.bfloat16)
     lora_b = torch.ones(out_dim, rank, dtype=torch.bfloat16) * 2.0
 
-    request = TensorLoRARequest(
+    request = OmniLoRARequest(
         lora_name="test_tensor",
         lora_int_id=42,
         lora_tensors={"transformer.foo": (lora_a, lora_b)},
@@ -205,7 +206,7 @@ def test_set_active_adapter_with_tensor_request(monkeypatch):
 
 
 def test_tensor_request_replaces_existing_adapter(monkeypatch):
-    """Loading a new TensorLoRARequest with the same ID should update weights."""
+    """Loading a new OmniLoRARequest with the same ID should update weights."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
@@ -223,7 +224,7 @@ def test_tensor_request_replaces_existing_adapter(monkeypatch):
     out_dim = 4
 
     # First request
-    req1 = TensorLoRARequest(
+    req1 = OmniLoRARequest(
         lora_name="step_1",
         lora_int_id=1,
         lora_tensors={"transformer.foo": (torch.ones(rank, in_dim), torch.ones(out_dim, rank))},
@@ -236,7 +237,7 @@ def test_tensor_request_replaces_existing_adapter(monkeypatch):
 
     # Remove and re-add with different weights (simulating RL training step update)
     manager.remove_adapter(1)
-    req2 = TensorLoRARequest(
+    req2 = OmniLoRARequest(
         lora_name="step_2",
         lora_int_id=2,
         lora_tensors={"transformer.foo": (torch.ones(rank, in_dim) * 3, torch.ones(out_dim, rank) * 5)},
@@ -271,11 +272,10 @@ def test_tensor_lora_multiple_modules():
     assert "transformer.v_proj" in lora_model.loras
 
 
-def test_tensor_lora_request_is_frozen():
-    """TensorLoRARequest should be immutable (frozen dataclass)."""
+def test_omni_lora_request_is_lora_request():
+    """OmniLoRARequest should be an instance of vLLM's LoRARequest."""
     request = _make_tensor_request()
-    with pytest.raises(AttributeError):
-        request.lora_name = "changed"
+    assert isinstance(request, LoRARequest)
 
 
 def test_tensor_lora_deactivation(monkeypatch):
