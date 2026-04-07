@@ -263,6 +263,27 @@ def test_omni_lora_request_is_lora_request():
     assert isinstance(request, LoRARequest)
 
 
+def test_omni_lora_request_rejects_invalid_id():
+    """OmniLoRARequest should reject lora_int_id < 1."""
+    with pytest.raises(ValueError, match="id must be > 0"):
+        OmniLoRARequest(
+            lora_name="bad",
+            lora_int_id=0,
+            lora_tensors={"foo": (torch.ones(2, 4), torch.ones(4, 2))},
+            rank=2,
+            lora_alpha=2,
+        )
+
+
+def test_omni_lora_request_rejects_neither_path_nor_tensors():
+    """OmniLoRARequest should reject when both lora_path and lora_tensors are missing."""
+    with pytest.raises(ValueError, match="Either lora_path or lora_tensors"):
+        OmniLoRARequest(
+            lora_name="empty",
+            lora_int_id=1,
+        )
+
+
 def test_tensor_lora_deactivation(monkeypatch):
     """Passing None after a tensor LoRA activation should deactivate."""
     manager = DiffusionLoRAManager(
