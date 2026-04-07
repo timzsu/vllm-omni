@@ -18,6 +18,9 @@ Assertions:
 import json
 import os
 
+from vllm_omni.inputs.data import OmniSamplingParams
+from vllm_omni.outputs import OmniRequestOutput
+
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 os.environ["VLLM_TEST_CLEAN_GPU_MEMORY"] = "1"
 
@@ -32,7 +35,7 @@ from safetensors.torch import save_file
 from tests.conftest import modify_stage_config
 from tests.utils import hardware_test
 from vllm_omni.entrypoints.omni import Omni
-from vllm_omni.lora.request import LoRARequest
+from vllm_omni.lora.request import LoRARequest, OmniLoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 MODEL = "ByteDance-Seed/BAGEL-7B-MoT"
@@ -59,7 +62,7 @@ def _resolve_stage_config(config_path: str, run_level: str) -> str:
     return config_path
 
 
-def _configure_sampling_params(omni: Omni, num_inference_steps: int = 10) -> list:
+def _configure_sampling_params(omni: Omni, num_inference_steps: int = 10) -> list[OmniSamplingParams]:
     params_list = omni.default_sampling_params_list
     if len(params_list) > 1:
         params_list[1].num_inference_steps = num_inference_steps
@@ -70,14 +73,10 @@ def _configure_sampling_params(omni: Omni, num_inference_steps: int = 10) -> lis
     return params_list
 
 
-def _extract_generated_image(omni_outputs: list) -> Image.Image | None:
+def _extract_generated_image(omni_outputs: list[OmniRequestOutput]) -> Image.Image | None:
     for req_output in omni_outputs:
-        if images := getattr(req_output, "images", None):
-            return images[0]
-        if hasattr(req_output, "request_output") and req_output.request_output:
-            stage_out = req_output.request_output
-            if hasattr(stage_out, "images") and stage_out.images:
-                return stage_out.images[0]
+        if req_output.images:
+            return req_output.images[0]
     return None
 
 
@@ -114,33 +113,52 @@ def _generate_bagel_image_with_lora(
     return img
 
 
-def _write_bagel_lora(adapter_dir: Path) -> str:
-    """Create a synthetic rank-4 LoRA adapter for BAGEL's DiT QKV projection."""
+# BAGEL uses GQA: hidden_size=3584, 28 Q heads, 4 KV heads, head_dim=128
+# QKV packed dim = 28*128 + 4*128 + 4*128 = 3584 + 512 + 512 = 4608
+_LORA_DIM = 3584
+_LORA_QKV_DIM = 4608
+_LORA_MODULE = "bagel.language_model.model.layers.0.self_attn.qkv_proj"
+_LORA_RANK = 4
+
+
+def _make_lora_weights() -> tuple[torch.Tensor, torch.Tensor]:
+    """Generate reproducible synthetic LoRA weight pair."""
+    gen = torch.Generator().manual_seed(42)
+    lora_a = torch.randn((_LORA_RANK, _LORA_DIM), dtype=torch.float32, generator=gen) * 0.1
+    lora_b = torch.randn((_LORA_QKV_DIM, _LORA_RANK), dtype=torch.float32, generator=gen) * 0.5
+    return lora_a, lora_b
+
+
+def _make_file_lora_request(adapter_dir: Path) -> LoRARequest:
+    """Write synthetic adapter to disk and return a file-backed LoRARequest."""
     adapter_dir.mkdir(parents=True, exist_ok=True)
-
-    # BAGEL uses GQA: hidden_size=3584, 28 Q heads, 4 KV heads, head_dim=128
-    # QKV packed dim = 28*128 + 4*128 + 4*128 = 3584 + 512 + 512 = 4608
-    dim = 3584
-    qkv_dim = 4608
-    module_name = "bagel.language_model.model.layers.0.self_attn.qkv_proj"
-    rank = 4
-
-    lora_a = torch.randn((rank, dim), dtype=torch.float32) * 0.1
-
-    lora_b = torch.randn((qkv_dim, rank), dtype=torch.float32) * 0.5
-
+    lora_a, lora_b = _make_lora_weights()
     save_file(
         {
-            f"base_model.model.{module_name}.lora_A.weight": lora_a,
-            f"base_model.model.{module_name}.lora_B.weight": lora_b,
+            f"base_model.model.{_LORA_MODULE}.lora_A.weight": lora_a,
+            f"base_model.model.{_LORA_MODULE}.lora_B.weight": lora_b,
         },
         str(adapter_dir / "adapter_model.safetensors"),
     )
     (adapter_dir / "adapter_config.json").write_text(
-        json.dumps({"r": rank, "lora_alpha": rank, "target_modules": [module_name]}),
+        json.dumps({"r": _LORA_RANK, "lora_alpha": _LORA_RANK, "target_modules": [_LORA_MODULE]}),
         encoding="utf-8",
     )
-    return str(adapter_dir)
+    lora_dir = str(adapter_dir)
+    return LoRARequest(lora_name="test_file", lora_int_id=stable_lora_int_id(lora_dir), lora_path=lora_dir)
+
+
+def _make_tensor_lora_request() -> OmniLoRARequest:
+    """Build an in-memory OmniLoRARequest from the same synthetic weights."""
+    lora_a, lora_b = _make_lora_weights()
+    return OmniLoRARequest(
+        lora_name="test_tensor",
+        lora_int_id=99,
+        lora_tensors={_LORA_MODULE: (lora_a, lora_b)},
+        rank=_LORA_RANK,
+        lora_alpha=_LORA_RANK,
+        target_modules=[_LORA_MODULE],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,18 +169,17 @@ def _write_bagel_lora(adapter_dir: Path) -> str:
 @pytest.mark.core_model
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
+@pytest.mark.parametrize("lora_mode", ["file", "tensor"])
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
-def test_bagel_lora_scale_and_deactivation(run_level, tmp_path):
-    """Validate LoRA effect, scale linearity, bounded perturbation, and clean deactivation."""
+def test_bagel_lora_scale_and_deactivation(run_level, tmp_path, lora_mode):
+    """Validate LoRA effect, bounded perturbation, and clean deactivation."""
     config_path = _resolve_stage_config(BAGEL_STAGE_CONFIG, run_level)
     omni = Omni(model=MODEL, stage_configs_path=config_path, stage_init_timeout=300)
     try:
-        lora_dir = _write_bagel_lora(tmp_path / "bagel_lora")
-        lora_request = LoRARequest(
-            lora_name="test",
-            lora_int_id=stable_lora_int_id(lora_dir),
-            lora_path=lora_dir,
-        )
+        if lora_mode == "file":
+            lora_request = _make_file_lora_request(tmp_path / "bagel_lora")
+        else:
+            lora_request = _make_tensor_lora_request()
 
         # 1) Baseline (no LoRA)
         baseline = _generate_bagel_image(omni)

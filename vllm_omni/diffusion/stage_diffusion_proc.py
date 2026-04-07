@@ -116,10 +116,10 @@ class StageDiffusionProc:
         """Reconstruct OmniDiffusionSamplingParams from a dict, handling LoRA."""
         lora_req = sampling_params_dict.get("lora_request")
         if lora_req is not None:
-            from vllm.lora.request import LoRARequest
+            from vllm_omni.lora.tensor_lora_request import OmniLoRARequest
 
-            if not isinstance(lora_req, LoRARequest):
-                sampling_params_dict["lora_request"] = msgspec.convert(lora_req, LoRARequest)
+            if not isinstance(lora_req, OmniLoRARequest):
+                sampling_params_dict["lora_request"] = msgspec.convert(lora_req, OmniLoRARequest)
 
         return OmniDiffusionSamplingParams(**sampling_params_dict)
 
