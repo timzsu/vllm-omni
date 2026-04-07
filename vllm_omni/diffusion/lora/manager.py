@@ -343,7 +343,7 @@ class DiffusionLoRAManager:
         )
 
         for lora in lora_model.loras.values():
-            lora.optimize()
+            lora.optimize()  # ref: _create_merged_loras_inplace, internal scaling
 
         return lora_model, peft_helper
 
