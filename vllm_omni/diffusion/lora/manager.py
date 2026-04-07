@@ -211,16 +211,11 @@ class DiffusionLoRAManager:
             return None
         return sub_suffixes
 
-    def set_active_adapter(
-        self,
-        lora_request: LoRARequest | None,
-        lora_scale: float = 1.0,
-    ) -> None:
+    def set_active_adapter(self, lora_request: LoRARequest | None, lora_scale: float = 1.0) -> None:
         """Set the active LoRA adapter for the pipeline.
 
         Args:
-            lora_request: The LoRA request (file-backed or tensor-backed),
-                or None to deactivate all adapters.
+            lora_request: The LoRA request, or None to deactivate all adapters.
             lora_scale: The external scale for the LoRA adapter.
         """
         if lora_request is None:
@@ -239,12 +234,11 @@ class DiffusionLoRAManager:
             return
 
         adapter_id = lora_request.lora_int_id
-        lora_path = getattr(lora_request, "lora_path", "<tensors>")
         logger.debug(
             "Setting active adapter: id=%d, name=%s, path=%s, scale=%.2f, cache_size=%d/%d",
             adapter_id,
             lora_request.lora_name,
-            lora_path,
+            lora_request.lora_path,
             lora_scale,
             len(self._registered_adapters),
             self.max_cached_adapters,
@@ -286,86 +280,64 @@ class DiffusionLoRAManager:
         if not self._expected_lora_modules:
             raise ValueError("No supported LoRA modules found in the diffusion pipeline.")
 
-        logger.debug("Supported LoRA modules: %s", self._expected_lora_modules)
+        # In-memory tensor path (OmniLoRARequest with lora_tensors set)
+        if isinstance(lora_request, OmniLoRARequest) and lora_request.lora_tensors is not None:
+            peft_helper = PEFTHelper(
+                r=lora_request.rank,
+                lora_alpha=lora_request.lora_alpha,
+                target_modules=lora_request.target_modules,
+            )
 
-        lora_path = get_adapter_absolute_path(lora_request.lora_path)
-        logger.debug("Resolved LoRA path: %s", lora_path)
+            loras: dict[str, LoRALayerWeights] = {}
+            for module_name, (lora_a, lora_b) in lora_request.lora_tensors.items():
+                loras[module_name] = LoRALayerWeights(
+                    module_name=module_name,
+                    rank=lora_request.rank,
+                    lora_alpha=lora_request.lora_alpha,
+                    lora_a=lora_a.to(dtype=self.dtype, device="cpu"),
+                    lora_b=lora_b.to(dtype=self.dtype, device="cpu"),
+                )
 
-        peft_helper = PEFTHelper.from_local_dir(
-            lora_path,
-            max_position_embeddings=None,  # no need in diffusion
-            tensorizer_config_dict=lora_request.tensorizer_config_dict,
-        )
+            lora_model = LoRAModel(
+                lora_model_id=lora_request.lora_int_id,
+                rank=lora_request.rank,
+                loras=loras,
+            )
+        else:
+            # File-backed path
+            logger.debug("Supported LoRA modules: %s", self._expected_lora_modules)
 
-        logger.info(
-            "Loaded PEFT config: r=%d, lora_alpha=%d, target_modules=%s",
-            peft_helper.r,
-            peft_helper.lora_alpha,
-            peft_helper.target_modules,
-        )
+            lora_path = get_adapter_absolute_path(lora_request.lora_path)
+            logger.debug("Resolved LoRA path: %s", lora_path)
 
-        lora_model = LoRAModel.from_local_checkpoint(
-            lora_path,
-            expected_lora_modules=self._expected_lora_modules,
-            peft_helper=peft_helper,
-            lora_model_id=lora_request.lora_int_id,
-            device="cpu",  # consistent w/ vllm's behavior
-            dtype=self.dtype,
-            model_vocab_size=None,
-            tensorizer_config_dict=lora_request.tensorizer_config_dict,
-            weights_mapper=None,
-        )
+            peft_helper = PEFTHelper.from_local_dir(
+                lora_path,
+                max_position_embeddings=None,  # no need in diffusion
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
+            )
+
+            logger.info(
+                "Loaded PEFT config: r=%d, lora_alpha=%d, target_modules=%s",
+                peft_helper.r,
+                peft_helper.lora_alpha,
+                peft_helper.target_modules,
+            )
+
+            lora_model = LoRAModel.from_local_checkpoint(
+                lora_path,
+                expected_lora_modules=self._expected_lora_modules,
+                peft_helper=peft_helper,
+                lora_model_id=lora_request.lora_int_id,
+                device="cpu",  # consistent w/ vllm's behavior
+                dtype=self.dtype,
+                model_vocab_size=None,
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
+                weights_mapper=None,
+            )
 
         logger.info(
             "Loaded LoRA model: id=%d, num_modules=%d, modules=%s",
             lora_model.id,
-            len(lora_model.loras),
-            list(lora_model.loras.keys()),
-        )
-
-        for lora in lora_model.loras.values():
-            lora.optimize()  # ref: _create_merged_loras_inplace, internal scaling
-
-        return lora_model, peft_helper
-
-    def _load_adapter_from_tensors(
-        self,
-        request: OmniLoRARequest,
-    ) -> tuple[LoRAModel, PEFTHelper]:
-        """Build a LoRAModel directly from in-memory tensors (no disk I/O).
-
-        Used by VeRL and similar RL training loops that keep LoRA weights
-        in GPU/CPU memory and push them after each gradient step.
-        """
-        if not self._expected_lora_modules:
-            raise ValueError("No supported LoRA modules found in the diffusion pipeline.")
-
-        peft_helper = PEFTHelper(
-            r=request.rank,
-            lora_alpha=request.lora_alpha,
-            target_modules=list(request.target_modules) if request.target_modules else [],
-        )
-
-        loras: dict[str, LoRALayerWeights] = {}
-        for module_name, (lora_a, lora_b) in request.lora_tensors.items():
-            loras[module_name] = LoRALayerWeights(
-                module_name=module_name,
-                rank=request.rank,
-                lora_alpha=request.lora_alpha,
-                lora_a=lora_a.to(dtype=self.dtype, device="cpu"),
-                lora_b=lora_b.to(dtype=self.dtype, device="cpu"),
-            )
-
-        lora_model = LoRAModel(
-            lora_model_id=request.lora_int_id,
-            rank=request.rank,
-            loras=loras,
-        )
-
-        logger.info(
-            "Built LoRA model from tensors: id=%d, rank=%d, num_modules=%d, modules=%s",
-            lora_model.id,
-            request.rank,
             len(lora_model.loras),
             list(lora_model.loras.keys()),
         )
@@ -720,10 +692,7 @@ class DiffusionLoRAManager:
         # so that we don't go over capacity on the new load
         self._evict_for_new_adapter()
 
-        if isinstance(lora_request, OmniLoRARequest) and lora_request.lora_tensors is not None:
-            lora_model, peft_helper = self._load_adapter_from_tensors(lora_request)
-        else:
-            lora_model, peft_helper = self._load_adapter(lora_request)
+        lora_model, peft_helper = self._load_adapter(lora_request)
         self._touch_adapter_info(adapter_id)
 
         self._registered_adapters[adapter_id] = lora_model

@@ -63,8 +63,8 @@ def _make_tensor_request(
 # -- Tests ---------------------------------------------------------------------
 
 
-def test_load_adapter_from_tensors_builds_lora_model():
-    """_load_adapter_from_tensors should build LoRAModel + PEFTHelper from tensors."""
+def test_load_adapter_builds_lora_model():
+    """_load_adapter should build LoRAModel + PEFTHelper from tensors."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
@@ -76,7 +76,7 @@ def test_load_adapter_from_tensors_builds_lora_model():
     rank = 4
     request = _make_tensor_request(adapter_id=1, rank=rank)
 
-    lora_model, peft_helper = manager._load_adapter_from_tensors(request)
+    lora_model, peft_helper = manager._load_adapter(request)
 
     assert lora_model.id == 1
     assert lora_model.rank == rank
@@ -85,7 +85,7 @@ def test_load_adapter_from_tensors_builds_lora_model():
     assert peft_helper.lora_alpha == rank
 
 
-def test_load_adapter_from_tensors_casts_dtype():
+def test_load_adapter_casts_dtype():
     """Tensors should be cast to the manager's dtype and moved to CPU."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
@@ -110,14 +110,14 @@ def test_load_adapter_from_tensors_casts_dtype():
         target_modules=[],
     )
 
-    lora_model, _ = manager._load_adapter_from_tensors(request)
+    lora_model, _ = manager._load_adapter(request)
     lora = lora_model.loras["transformer.foo"]
     assert lora.lora_a.dtype == torch.bfloat16
     assert lora.lora_b.dtype == torch.bfloat16
     assert lora.lora_a.device == torch.device("cpu")
 
 
-def test_load_adapter_from_tensors_raises_without_expected_modules():
+def test_load_adapter_raises_without_expected_modules():
     """Should raise ValueError if pipeline has no supported LoRA modules."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
@@ -129,39 +129,24 @@ def test_load_adapter_from_tensors_raises_without_expected_modules():
 
     request = _make_tensor_request()
     with pytest.raises(ValueError, match="No supported LoRA modules"):
-        manager._load_adapter_from_tensors(request)
+        manager._load_adapter(request)
 
 
-def test_add_adapter_dispatches_tensor_request(monkeypatch):
-    """add_adapter should use _load_adapter_from_tensors for OmniLoRARequest."""
+def test_add_adapter_registers_tensor_request(monkeypatch):
+    """add_adapter should load and register an OmniLoRARequest with tensors."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
         dtype=torch.bfloat16,
         max_cached_adapters=2,
     )
-
-    load_calls: list[str] = []
-
-    def _fake_load_tensors(req: OmniLoRARequest):
-        load_calls.append("tensors")
-        lora_model = type("LM", (), {"id": req.lora_int_id})()
-        peft_helper = type("PH", (), {"r": req.rank})()
-        return lora_model, peft_helper
-
-    def _fake_load_file(req):
-        load_calls.append("file")
-        lora_model = type("LM", (), {"id": req.lora_int_id})()
-        peft_helper = type("PH", (), {"r": 4})()
-        return lora_model, peft_helper
-
-    monkeypatch.setattr(manager, "_load_adapter_from_tensors", _fake_load_tensors)
-    monkeypatch.setattr(manager, "_load_adapter", _fake_load_file)
+    manager._expected_lora_modules = {"foo"}
     monkeypatch.setattr(manager, "_replace_layers_with_lora", lambda _peft: None)
 
     tensor_req = _make_tensor_request(adapter_id=1)
     manager.add_adapter(tensor_req)
-    assert load_calls == ["tensors"]
+    assert 1 in manager._registered_adapters
+    assert "transformer.foo" in manager._registered_adapters[1].loras
 
 
 def test_set_active_adapter_with_tensor_request(monkeypatch):
@@ -252,7 +237,7 @@ def test_tensor_request_replaces_existing_adapter(monkeypatch):
 
 
 def test_tensor_lora_multiple_modules():
-    """_load_adapter_from_tensors should handle multiple module names."""
+    """_load_adapter should handle multiple module names."""
     manager = DiffusionLoRAManager(
         pipeline=torch.nn.Module(),
         device=torch.device("cpu"),
@@ -266,7 +251,7 @@ def test_tensor_lora_multiple_modules():
         module_names=["transformer.q_proj", "transformer.v_proj"],
     )
 
-    lora_model, _ = manager._load_adapter_from_tensors(request)
+    lora_model, _ = manager._load_adapter(request)
     assert len(lora_model.loras) == 2
     assert "transformer.q_proj" in lora_model.loras
     assert "transformer.v_proj" in lora_model.loras
