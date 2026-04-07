@@ -36,17 +36,8 @@ from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 MODEL = "ByteDance-Seed/BAGEL-7B-MoT"
-BAGEL_STAGE_CONFIG_1GPU = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_ci.yaml")
-BAGEL_STAGE_CONFIG_2GPU = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_2gpu_ci.yaml")
+BAGEL_STAGE_CONFIG = str(Path(__file__).parent / "stage_configs" / "bagel_sharedmemory_ci.yaml")
 DEFAULT_PROMPT = "<|im_start|>A cute cat<|im_end|>"
-
-
-def _select_stage_config() -> str:
-    """Pick the 2-GPU config when multiple GPUs are available."""
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    if num_gpus >= 2:
-        return BAGEL_STAGE_CONFIG_2GPU
-    return BAGEL_STAGE_CONFIG_1GPU
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +154,7 @@ def _write_bagel_lora(adapter_dir: Path) -> str:
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
 def test_bagel_lora_scale_and_deactivation(run_level, tmp_path):
     """Validate LoRA effect, scale linearity, bounded perturbation, and clean deactivation."""
-    config_path = _resolve_stage_config(_select_stage_config(), run_level)
+    config_path = _resolve_stage_config(BAGEL_STAGE_CONFIG, run_level)
     omni = Omni(model=MODEL, stage_configs_path=config_path, stage_init_timeout=300)
     try:
         lora_dir = _write_bagel_lora(tmp_path / "bagel_lora")
