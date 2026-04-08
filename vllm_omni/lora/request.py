@@ -5,6 +5,4 @@
 # as this is a user-facing variable, defined here to so that user can directly import LoRARequest from vllm_omni
 from vllm.lora.request import LoRARequest
 
-from vllm_omni.lora.tensor_lora_request import OmniLoRARequest
-
-__all__ = ["LoRARequest", "OmniLoRARequest"]
+__all__ = ["LoRARequest"]

@@ -35,7 +35,7 @@ from safetensors.torch import save_file
 from tests.conftest import modify_stage_config
 from tests.utils import hardware_test
 from vllm_omni.entrypoints.omni import Omni
-from vllm_omni.lora.request import LoRARequest, OmniLoRARequest
+from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
 MODEL = "ByteDance-Seed/BAGEL-7B-MoT"
@@ -121,18 +121,12 @@ _LORA_MODULE = "bagel.language_model.model.layers.0.self_attn.qkv_proj"
 _LORA_RANK = 4
 
 
-def _make_lora_weights() -> tuple[torch.Tensor, torch.Tensor]:
-    """Generate reproducible synthetic LoRA weight pair."""
-    gen = torch.Generator().manual_seed(42)
-    lora_a = torch.randn((_LORA_RANK, _LORA_DIM), dtype=torch.float32, generator=gen) * 0.1
-    lora_b = torch.randn((_LORA_QKV_DIM, _LORA_RANK), dtype=torch.float32, generator=gen) * 0.5
-    return lora_a, lora_b
-
-
 def _make_file_lora_request(adapter_dir: Path) -> LoRARequest:
     """Write synthetic adapter to disk and return a file-backed LoRARequest."""
     adapter_dir.mkdir(parents=True, exist_ok=True)
-    lora_a, lora_b = _make_lora_weights()
+    gen = torch.Generator().manual_seed(42)
+    lora_a = torch.randn((_LORA_RANK, _LORA_DIM), dtype=torch.float32, generator=gen) * 0.1
+    lora_b = torch.randn((_LORA_QKV_DIM, _LORA_RANK), dtype=torch.float32, generator=gen) * 0.5
     save_file(
         {
             f"base_model.model.{_LORA_MODULE}.lora_A.weight": lora_a,
@@ -148,19 +142,6 @@ def _make_file_lora_request(adapter_dir: Path) -> LoRARequest:
     return LoRARequest(lora_name="test_file", lora_int_id=stable_lora_int_id(lora_dir), lora_path=lora_dir)
 
 
-def _make_tensor_lora_request() -> OmniLoRARequest:
-    """Build an in-memory OmniLoRARequest from the same synthetic weights."""
-    lora_a, lora_b = _make_lora_weights()
-    return OmniLoRARequest(
-        lora_name="test_tensor",
-        lora_int_id=99,
-        lora_tensors={_LORA_MODULE: (lora_a, lora_b)},
-        rank=_LORA_RANK,
-        lora_alpha=_LORA_RANK,
-        target_modules=[_LORA_MODULE],
-    )
-
-
 # ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
@@ -169,17 +150,13 @@ def _make_tensor_lora_request() -> OmniLoRARequest:
 @pytest.mark.core_model
 @pytest.mark.advanced_model
 @pytest.mark.diffusion
-@pytest.mark.parametrize("lora_mode", ["file", "tensor"])
 @hardware_test(res={"cuda": "H100", "rocm": "MI325"})
-def test_bagel_lora_scale_and_deactivation(run_level, tmp_path, lora_mode):
+def test_bagel_lora_scale_and_deactivation(run_level, tmp_path):
     """Validate LoRA effect, bounded perturbation, and clean deactivation."""
     config_path = _resolve_stage_config(BAGEL_STAGE_CONFIG, run_level)
     omni = Omni(model=MODEL, stage_configs_path=config_path, stage_init_timeout=300)
     try:
-        if lora_mode == "file":
-            lora_request = _make_file_lora_request(tmp_path / "bagel_lora")
-        else:
-            lora_request = _make_tensor_lora_request()
+        lora_request = _make_file_lora_request(tmp_path / "bagel_lora")
 
         # 1) Baseline (no LoRA)
         baseline = _generate_bagel_image(omni)
