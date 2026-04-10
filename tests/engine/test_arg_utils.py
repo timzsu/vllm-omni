@@ -15,6 +15,7 @@ from vllm.engine.arg_utils import EngineArgs
 
 from vllm_omni.config.model import OmniModelConfig
 from vllm_omni.engine.arg_utils import OmniEngineArgs
+from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -165,3 +166,42 @@ def test_stage_specific_text_config_override():
     assert omni_config.attention_chunk_size == 2048
     assert omni_config.max_model_len == 4096
     assert omni_config.hf_text_config.sliding_window is None
+
+
+def test_stage_configs_path_field():
+    """OmniEngineArgs with stage_configs_path should construct without error."""
+    args = OmniEngineArgs(stage_configs_path="/some/path.yaml")
+    assert args.stage_configs_path == "/some/path.yaml"
+
+
+def test_strip_single_engine_args():
+    """_strip_single_engine_args should remove EngineArgs fields but keep omni fields."""
+    kwargs = {
+        # Parent EngineArgs fields — should be stripped
+        "compilation_config": '{"cudagraph_mode": "FULL_AND_PIECEWISE"}',
+        "tensor_parallel_size": 4,
+        "gpu_memory_utilization": 0.9,
+        "model": "some/model",
+        # Parent field that should be kept (allowlisted)
+        "worker_extension_cls": "some.Extension",
+        # OmniEngineArgs-only / non-engine fields — should pass through
+        "stage_configs_path": "/path/to/yaml",
+        "custom_pipeline_args": {"pipeline_class": "my.Pipeline"},
+        "mode": "text-to-image",
+        "lora_path": "/some/lora",
+    }
+
+    filtered = AsyncOmniEngine._strip_single_engine_args(kwargs)
+
+    # Stripped
+    assert "compilation_config" not in filtered
+    assert "tensor_parallel_size" not in filtered
+    assert "gpu_memory_utilization" not in filtered
+    assert "model" not in filtered
+
+    # Kept
+    assert filtered["worker_extension_cls"] == "some.Extension"
+    assert filtered["stage_configs_path"] == "/path/to/yaml"
+    assert filtered["custom_pipeline_args"] == {"pipeline_class": "my.Pipeline"}
+    assert filtered["mode"] == "text-to-image"
+    assert filtered["lora_path"] == "/some/lora"
