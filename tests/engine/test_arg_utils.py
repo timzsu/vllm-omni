@@ -193,15 +193,17 @@ def test_strip_single_engine_args():
 
     filtered = AsyncOmniEngine._strip_single_engine_args(kwargs)
 
-    # Stripped
+    # Stripped — parent EngineArgs fields
     assert "compilation_config" not in filtered
     assert "tensor_parallel_size" not in filtered
     assert "gpu_memory_utilization" not in filtered
     assert "model" not in filtered
 
+    # Stripped — orchestrator-level OmniEngineArgs field
+    assert "stage_configs_path" not in filtered
+
     # Kept
     assert filtered["worker_extension_cls"] == "some.Extension"
-    assert filtered["stage_configs_path"] == "/path/to/yaml"
     assert filtered["custom_pipeline_args"] == {"pipeline_class": "my.Pipeline"}
     assert filtered["mode"] == "text-to-image"
     assert filtered["lora_path"] == "/some/lora"

@@ -115,10 +115,8 @@ class OmniEngineArgs(EngineArgs):
         omni_master_port: TCP port for the OmniMasterServer registration
             socket.  Required when single-stage mode is active.
         stage_configs_path: Optional path to a JSON/YAML file containing
-            stage configurations for the multi-stage pipeline. When set,
-            each stage defines its own engine args and single-engine fields
-            are stripped before the per-stage merge. If None, stage configs
-            are resolved from the model's default configuration.
+            stage configurations for the multi-stage pipeline. If None,
+            stage configs are resolved from the model's default configuration.
         output_modalities: Optional list of output modality names to enable
             (e.g. ["text", "audio"]). If None, all modalities supported by
             the model are used.

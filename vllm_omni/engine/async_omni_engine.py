@@ -1242,11 +1242,17 @@ class AsyncOmniEngine:
         # worker_extension_cls is a parent field but must pass through to
         # diffusion stages for colocate worker setup.
         _keep = {"worker_extension_cls"}
+        # Orchestrator-level OmniEngineArgs fields that are consumed by
+        # _resolve_stage_configs and must not leak into per-stage configs
+        # (stage_configs_path would trigger the create_model_config guard).
+        _strip_omni = {"stage_configs_path"}
 
         parent_fields: dict[str, dataclasses.Field] = {f.name: f for f in dataclasses.fields(EngineArgs)}
         overridden: list[str] = []
         result: dict[str, Any] = {}
         for k, v in kwargs.items():
+            if k in _strip_omni:
+                continue
             if k not in parent_fields or k in _keep:
                 result[k] = v
                 continue
