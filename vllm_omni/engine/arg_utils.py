@@ -115,12 +115,17 @@ class OmniEngineArgs(EngineArgs):
         omni_master_port: TCP port for the OmniMasterServer registration
             socket.  Required when single-stage mode is active.
         stage_configs_path: Optional path to a JSON/YAML file containing
-            stage configurations for the multi-stage pipeline. If None,
-            stage configs are resolved from the model's default configuration.
+            stage configurations for the multi-stage pipeline. When set,
+            each stage defines its own engine args and single-engine fields
+            are stripped before the per-stage merge. If None, stage configs
+            are resolved from the model's default configuration.
         output_modalities: Optional list of output modality names to enable
             (e.g. ["text", "audio"]). If None, all modalities supported by
             the model are used.
         log_stats: Whether to log engine statistics. Defaults to False.
+        custom_pipeline_args: Dictionary of arguments for custom pipeline
+            initialization (e.g., ``{"pipeline_class": "my.Module"}``).
+            Passed through to the diffusion stage engine.
     """
 
     stage_id: int = 0
@@ -140,6 +145,7 @@ class OmniEngineArgs(EngineArgs):
     stage_configs_path: str | None = None
     output_modalities: list[str] | None = None
     log_stats: bool = False
+    custom_pipeline_args: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         load_omni_general_plugins()
@@ -187,6 +193,11 @@ class OmniEngineArgs(EngineArgs):
         Returns:
             OmniModelConfig instance with all configuration fields set
         """
+        if self.stage_configs_path is not None:
+            raise RuntimeError(
+                "create_model_config() should not be called when stage_configs_path is set. "
+                "Per-stage model configs are resolved from the stage config YAML."
+            )
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 

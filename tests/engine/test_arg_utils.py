@@ -4,6 +4,7 @@ invariant to the specific attributes of vLLM config except in cases where we
 explicitly patch values that differ from vLLM.
 """
 
+import argparse
 import inspect
 from unittest.mock import Mock
 
@@ -114,6 +115,26 @@ def test_qwen3_tts_codec_frame_rate_patching():
 
     # Verify codec_frame_rate_hz was patched
     assert omni_config.codec_frame_rate_hz == 12.3
+
+
+def test_stage_configs_path_blocks_create_model_config():
+    """create_model_config() should raise when stage_configs_path is set."""
+    args = OmniEngineArgs(stage_configs_path="/some/path.yaml")
+    with pytest.raises(RuntimeError, match="stage_configs_path"):
+        args.create_model_config()
+
+
+def test_from_cli_args_picks_up_stage_configs_path():
+    """from_cli_args should pick up stage_configs_path from namespace."""
+    ns = argparse.Namespace(
+        model="facebook/opt-125m",
+        stage_configs_path="/some/path.yaml",
+        custom_pipeline_args=None,
+    )
+
+    args = OmniEngineArgs.from_cli_args(ns)
+    assert args.stage_configs_path == "/some/path.yaml"
+    assert args.custom_pipeline_args is None
 
 
 def test_stage_specific_text_config_override():
