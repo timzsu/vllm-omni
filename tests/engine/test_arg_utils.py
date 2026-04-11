@@ -207,3 +207,33 @@ def test_strip_single_engine_args():
     assert filtered["custom_pipeline_args"] == {"pipeline_class": "my.Pipeline"}
     assert filtered["mode"] == "text-to-image"
     assert filtered["lora_path"] == "/some/lora"
+
+
+def test_strip_single_engine_args_model_does_not_trigger_warning(mocker):
+    """model is always in kwargs (callers set it via from_cli_args/asdict),
+    so it should not cause the override warning by itself or appear in it."""
+    mock_warn = mocker.patch("vllm_omni.engine.async_omni_engine.logger.warning")
+
+    # Typical caller kwargs: model is always present, no other parent
+    # EngineArgs fields are explicitly overridden.
+    AsyncOmniEngine._strip_single_engine_args(
+        {
+            "model": "some/model",
+            "custom_pipeline_args": {"pipeline_class": "my.Pipeline"},
+        }
+    )
+    mock_warn.assert_not_called()
+
+    # When there *are* genuinely surprising overrides alongside model,
+    # the warning should mention them but not model.
+    AsyncOmniEngine._strip_single_engine_args(
+        {
+            "model": "some/model",
+            "tensor_parallel_size": 4,
+            "custom_pipeline_args": {"pipeline_class": "my.Pipeline"},
+        }
+    )
+    mock_warn.assert_called_once()
+    warned_args = mock_warn.call_args[0][-1]  # the formatted arg list
+    assert "tensor_parallel_size" in warned_args
+    assert "model" not in warned_args

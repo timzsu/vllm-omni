@@ -1246,6 +1246,10 @@ class AsyncOmniEngine:
         # _resolve_stage_configs and must not leak into per-stage configs
         # (stage_configs_path would trigger the create_model_config guard).
         _strip_omni = {"stage_configs_path"}
+        # Fields that are always set by callers (via from_cli_args / asdict)
+        # and would always appear as overridden — suppress from the warning
+        # so it only surfaces genuinely surprising overrides.
+        _no_warn = {"model"}
 
         parent_fields: dict[str, dataclasses.Field] = {f.name: f for f in dataclasses.fields(EngineArgs)}
         overridden: list[str] = []
@@ -1271,7 +1275,7 @@ class AsyncOmniEngine:
             # Normalise dataclass defaults to dicts for comparison
             if dataclasses.is_dataclass(default) and not isinstance(default, type):
                 default = dataclasses.asdict(default)
-            if v != default:
+            if v != default and k not in _no_warn:
                 overridden.append(k)
 
         if overridden:
