@@ -98,6 +98,28 @@ class ResBlock(torch.nn.Module):
             remove_weight_norm(self.convs2[idx])
 
 
+def _carry_phase_at_boundary(
+    cum_total: torch.Tensor,
+    phase_acc: torch.Tensor | None,
+    next_overlap: int,
+    *,
+    dim: int,
+    trim: int = 0,
+) -> torch.Tensor | None:
+    """Accumulated phase (mod 1) carried into the next streaming window.
+
+    Shared by SineGen and SineGen2 so harmonic phase stays continuous across
+    chunk boundaries when HiFT runs over a bounded mel window. ``cum_total``
+    must already include ``phase_acc``; falls back to it unchanged if
+    ``next_overlap`` (+ ``trim``) covers the whole window.
+    """
+    length = cum_total.shape[dim]
+    if next_overlap >= length + trim:
+        return phase_acc
+    idx = length + trim - next_overlap - 1
+    return cum_total.narrow(dim, idx, 1) % 1
+
+
 class SineGen(torch.nn.Module):
     """Definition of sine generator
     SineGen(samp_rate, harmonic_num = 0,
@@ -121,6 +143,11 @@ class SineGen(torch.nn.Module):
         self.harmonic_num = harmonic_num
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
+        self.register_buffer(
+            "noise_buf",
+            torch.rand(1, 300 * 24000, harmonic_num + 1),
+            persistent=False,
+        )
 
     def _f02uv(self, f0):
         # generate uv signal
@@ -128,7 +155,7 @@ class SineGen(torch.nn.Module):
         return uv
 
     @torch.no_grad()
-    def forward(self, f0):
+    def forward(self, f0, phase_acc=None, next_overlap=0, noise_offset=0):
         """sine_tensor, uv = forward(f0)
         input F0: tensor(batchsize=1, dim=1, length)
                   f0 for unvoiced steps should be 0
@@ -140,7 +167,10 @@ class SineGen(torch.nn.Module):
         for i in range(self.harmonic_num + 1):
             F_mat[:, i : i + 1, :] = f0 * (i + 1) / self.sampling_rate
 
-        theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
+        cum = torch.cumsum(F_mat, dim=-1)
+        cum_total = cum if phase_acc is None else phase_acc + cum
+        theta_mat = 2 * np.pi * (cum_total % 1)
+        new_phase_acc = _carry_phase_at_boundary(cum_total, phase_acc, next_overlap, dim=-1)
         u_dist = Uniform(low=-np.pi, high=np.pi)
         phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
         phase_vec[:, 0, :] = 0
@@ -155,12 +185,16 @@ class SineGen(torch.nn.Module):
         #        std = self.sine_amp/3 -> max value ~ self.sine_amp
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
-        noise = noise_amp * torch.randn_like(sine_waves)
+        # Index a fixed buffer by absolute sample position instead of drawing
+        # torch.randn_like: the draw size would depend on the window length and
+        # perturb the global RNG, breaking byte-identity between the full re-run
+        # and the bounded-window streaming path.
+        noise = noise_amp * self.noise_buf[:, noise_offset : noise_offset + sine_waves.shape[-1], :].transpose(1, 2)
 
         # first: set the unvoiced part to 0 by uv
         # then: additive noise
         sine_waves = sine_waves * uv + noise
-        return sine_waves.transpose(1, 2), uv.transpose(1, 2), noise
+        return sine_waves.transpose(1, 2), uv.transpose(1, 2), noise, new_phase_acc
 
 
 class SineGen2(torch.nn.Module):
@@ -215,7 +249,7 @@ class SineGen2(torch.nn.Module):
         uv = (f0 > self.voiced_threshold).type(torch.float32)
         return uv
 
-    def _f02sine(self, f0_values):
+    def _f02sine(self, f0_values, phase_acc=None, next_overlap=0, trim=0):
         """f0_values: (batchsize, length, dim)
         where dim indicates fundamental tone and overtones
         """
@@ -237,7 +271,10 @@ class SineGen2(torch.nn.Module):
                 rad_values.transpose(1, 2), scale_factor=1 / self.upsample_scale, mode="linear"
             ).transpose(1, 2)
 
-            phase = torch.cumsum(rad_values, dim=1) * 2 * np.pi
+            cum = torch.cumsum(rad_values, dim=1)
+            phase = cum if phase_acc is None else cum + phase_acc
+            new_phase_acc = _carry_phase_at_boundary(phase, phase_acc, next_overlap, dim=1, trim=trim)
+            phase = phase * 2 * np.pi
             phase = torch.nn.functional.interpolate(
                 phase.transpose(1, 2) * self.upsample_scale,
                 scale_factor=self.upsample_scale,
@@ -272,9 +309,10 @@ class SineGen2(torch.nn.Module):
 
             # get the sines
             sines = torch.cos(i_phase * 2 * np.pi)
-        return sines
+            new_phase_acc = None
+        return sines, new_phase_acc
 
-    def forward(self, f0):
+    def forward(self, f0, phase_acc=None, next_overlap=0, trim=0):
         """sine_tensor, uv = forward(f0)
         input F0: tensor(batchsize=1, length, dim=1)
                   f0 for unvoiced steps should be 0
@@ -285,7 +323,8 @@ class SineGen2(torch.nn.Module):
         fn = torch.multiply(f0, self.harmonic_ids)
 
         # generate sine waveforms
-        sine_waves = self._f02sine(fn) * self.sine_amp
+        sine_waves, new_phase_acc = self._f02sine(fn, phase_acc, next_overlap, trim)
+        sine_waves = sine_waves * self.sine_amp
 
         # generate uv signal
         uv = self._f02uv(f0)
@@ -302,7 +341,7 @@ class SineGen2(torch.nn.Module):
         # first: set the unvoiced part to 0 by uv
         # then: additive noise
         sine_waves = sine_waves * uv + noise
-        return sine_waves, uv, noise
+        return sine_waves, uv, noise, new_phase_acc
 
 
 class SourceModuleHnNSF(torch.nn.Module):
@@ -354,7 +393,7 @@ class SourceModuleHnNSF(torch.nn.Module):
         if causal is True:
             self.uv = torch.rand(1, 300 * 24000, 1)
 
-    def forward(self, x):
+    def forward(self, x, phase_acc=None, uv_offset=0, next_overlap=0, trim=0):
         """
         Sine_source, noise_source = SourceModuleHnNSF(F0_sampled)
         F0_sampled (batchsize, length, 1)
@@ -363,15 +402,18 @@ class SourceModuleHnNSF(torch.nn.Module):
         """
         # source for harmonic branch
         with torch.no_grad():
-            sine_wavs, uv, _ = self.l_sin_gen(x)
+            if isinstance(self.l_sin_gen, SineGen):
+                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, noise_offset=uv_offset)
+            else:
+                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, trim)
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
 
         # source for noise branch, in the same shape as uv
         if self.training is False and self.causal is True:
-            noise = self.uv[:, : uv.shape[1]] * self.sine_amp / 3
+            noise = self.uv[:, uv_offset : uv_offset + uv.shape[1]] * self.sine_amp / 3
         else:
             noise = torch.randn_like(uv) * self.sine_amp / 3
-        return sine_merge, noise, uv
+        return sine_merge, noise, uv, new_phase_acc
 
 
 class HiFTGenerator(nn.Module):
@@ -572,7 +614,7 @@ class HiFTGenerator(nn.Module):
         f0 = self.f0_predictor(speech_feat)
         # f0->source
         s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
-        s, _, _ = self.m_source(s)
+        s, _, _, _ = self.m_source(s)
         s = s.transpose(1, 2)
         # mel+source->speech
         generated_speech = self.decode(x=speech_feat, s=s)
@@ -588,7 +630,7 @@ class HiFTGenerator(nn.Module):
         f0 = self.f0_predictor(speech_feat)
         # f0->source
         s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
-        s, _, _ = self.m_source(s)
+        s, _, _, _ = self.m_source(s)
         s = s.transpose(1, 2)
         # use cache_source to avoid glitch
         if cache_source.shape[2] != 0:
@@ -751,14 +793,24 @@ class CausalHiFTGenerator(HiFTGenerator):
         return x
 
     @torch.inference_mode()
-    def inference(self, speech_feat: torch.Tensor, finalize: bool = True) -> torch.Tensor:
+    def inference(
+        self,
+        speech_feat: torch.Tensor,
+        finalize: bool = True,
+        phase_acc: torch.Tensor | None = None,
+        uv_offset: int = 0,
+        next_overlap: int = 0,
+        trim: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         # mel->f0 NOTE f0_predictor precision is crucial for causal inference, move
         # self.f0_predictor to cpu if necessary
         self.f0_predictor.to("cpu")
         f0 = self.f0_predictor(speech_feat.cpu(), finalize=finalize).to(speech_feat)
         # f0->source
         s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
-        s, _, _ = self.m_source(s)
+        s, _, _, new_phase_acc = self.m_source(
+            s, phase_acc=phase_acc, uv_offset=uv_offset, next_overlap=next_overlap, trim=trim
+        )
         s = s.transpose(1, 2)
         if finalize is True:
             generated_speech = self.decode(x=speech_feat, s=s, finalize=finalize)
@@ -766,7 +818,7 @@ class CausalHiFTGenerator(HiFTGenerator):
             generated_speech = self.decode(
                 x=speech_feat[:, :, : -self.f0_predictor.condnet[0].causal_padding], s=s, finalize=finalize
             )
-        return generated_speech, s
+        return generated_speech, s, new_phase_acc
 
 
 class CausalConv1dUpsample(torch.nn.Conv1d):

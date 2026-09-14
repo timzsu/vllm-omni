@@ -559,7 +559,11 @@ def test_code2wav_forward_finalizes_hift_tail():
 
         def inference(self, speech_feat, finalize=True):
             self.finalize_calls.append(bool(finalize))
-            return torch.zeros((speech_feat.shape[0], 1, speech_feat.shape[-1]), dtype=speech_feat.dtype), None
+            return (
+                torch.zeros((speech_feat.shape[0], 1, speech_feat.shape[-1]), dtype=speech_feat.dtype),
+                None,
+                None,
+            )
 
     model = object.__new__(CosyVoice3Code2Wav)
     nn.Module.__init__(model)
