@@ -29,6 +29,18 @@ sound:
   not a meaningful bar, whereas the float bound is.
 * **Boundedness** — the per-chunk window does not grow with the cumulative mel
   history, so the O(n) per-chunk slope is actually removed.
+
+``SourceModuleHnNSF`` picks between two harmonic-source implementations by
+sampling rate: ``SineGen`` at 22050 Hz, ``SineGen2`` at anything else --
+CosyVoice3 itself runs at 24000 Hz, so ``SineGen2`` is what actually ships.
+The three correctness tests below are parametrized across both configs
+(``REAL_CONFIG`` / ``LEGACY_CONFIG``) so neither can silently go untested the
+way ``SineGen2`` did during development: the fixture used to default to
+22050 Hz, so every "correctness" assertion was validating the class
+CosyVoice3 does not use, while the shipped ``SineGen2`` path had an
+unguarded fixed-buffer read that diverged from the full recompute by ~3.4%
+under real windowing -- five orders of magnitude past this file's own
+tolerance -- with nothing here able to catch it.
 """
 
 import pytest
@@ -38,6 +50,8 @@ import torch.nn as nn
 from vllm_omni.model_executor.models.cosyvoice3.code2wav_core.hifigan import (
     CausalConvRNNF0Predictor,
     CausalHiFTGenerator,
+    SineGen,
+    SineGen2,
 )
 from vllm_omni.model_executor.models.cosyvoice3.cosyvoice3_code2wav import CosyVoice3Code2Wav
 
@@ -64,16 +78,39 @@ PCM16_LSB = 1.0 / 32767.0
 ATOL = 1e-6
 RTOL = 1e-5
 
+# The config CosyVoice3 actually ships (vllm_omni/transformers_utils/configs/
+# cosyvoice3.py: sample_rate=24000, nb_harmonics=8) -- resolves to SineGen2.
+# nb_harmonics=8 is not a free choice here: SineGen2's causal-mode buffers
+# (rand_ini, sine_waves) are hardcoded to dimension 9 (= harmonic_num + 1)
+# rather than parametrized, matching upstream, so this is the only harmonic
+# count that does not crash on shape mismatch.
+REAL_CONFIG = {"sampling_rate": 24000, "nb_harmonics": 8}
 
-def _make_hift() -> CausalHiFTGenerator:
-    """A small CausalHiFTGenerator with a real (tiny) F0 predictor."""
+# The other harmonic-source class (SineGen, sinegen_type="1"), used when
+# sampling_rate == 22050. Not CosyVoice3's own config, but real code this
+# repo ships and could regress silently without its own coverage.
+LEGACY_CONFIG = {"sampling_rate": 22050, "nb_harmonics": 4}
+
+CONFIGS = [
+    pytest.param(REAL_CONFIG, id="sinegen2_real_config"),
+    pytest.param(LEGACY_CONFIG, id="sinegen1_legacy_config"),
+]
+
+
+def _make_hift(config: dict = REAL_CONFIG) -> CausalHiFTGenerator:
+    """A small CausalHiFTGenerator with a real (tiny) F0 predictor.
+
+    Defaults to REAL_CONFIG (24000 Hz / SineGen2) -- the class CosyVoice3
+    actually uses -- rather than an arbitrary sampling rate, so a test that
+    forgets to specify a config still exercises the shipped path.
+    """
     torch.manual_seed(0)
     f0_predictor = CausalConvRNNF0Predictor(num_class=1, in_channels=80, cond_channels=16)
     return CausalHiFTGenerator(
         in_channels=80,
         base_channels=32,
-        nb_harmonics=4,
-        sampling_rate=22050,
+        nb_harmonics=config["nb_harmonics"],
+        sampling_rate=config["sampling_rate"],
         upsample_rates=[8, 5, 3],
         upsample_kernel_sizes=[16, 11, 7],
         source_resblock_kernel_sizes=[7, 7, 11],
@@ -82,6 +119,22 @@ def _make_hift() -> CausalHiFTGenerator:
         resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
         f0_predictor=f0_predictor,
     ).eval()
+
+
+def test_real_config_resolves_to_sinegen2():
+    """Lock in the fact CosyVoice3's own config (24000 Hz) uses SineGen2.
+
+    This is the guard the pre-fix test suite was missing: it existed only
+    for a 22050 Hz fixture (SineGen), so it never actually ran the class
+    CosyVoice3 ships, and a 3.4%-divergence bug in SineGen2's windowed noise
+    handling went undetected. If this assertion ever fails, every test below
+    parametrized on REAL_CONFIG is silently testing the wrong class again.
+    """
+    hift = _make_hift(REAL_CONFIG)
+    assert isinstance(hift.m_source.l_sin_gen, SineGen2)
+
+    hift_legacy = _make_hift(LEGACY_CONFIG)
+    assert isinstance(hift_legacy.m_source.l_sin_gen, SineGen)
 
 
 def _make_model(hift: CausalHiFTGenerator, window_len: int) -> CosyVoice3Code2Wav:
@@ -147,10 +200,11 @@ def _rel_divergence(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).abs().mean() / a.abs().mean().clamp_min(1e-6)).item()
 
 
-def test_incremental_hift_matches_full_reference_exactly_with_full_history():
+@pytest.mark.parametrize("config", CONFIGS)
+def test_incremental_hift_matches_full_reference_exactly_with_full_history(config):
     """With a window covering the full history, the windowed path must match the
     full cumulative re-run exactly. This proves the phase/noise carry is right."""
-    hift = _make_hift()
+    hift = _make_hift(config)
     model = _make_model(hift, window_len=TOTAL_MEL)  # window >= history
     chunks = _chunks()
 
@@ -161,10 +215,11 @@ def test_incremental_hift_matches_full_reference_exactly_with_full_history():
     assert _rel_divergence(full, incr) < 1e-6
 
 
-def test_incremental_hift_bounded_window_is_close():
+@pytest.mark.parametrize("config", CONFIGS)
+def test_incremental_hift_bounded_window_is_close(config):
     """With a bounded window, the windowed path stays close to the full re-run;
     only the truncated deep history diverges, and it is small."""
-    hift = _make_hift()
+    hift = _make_hift(config)
     model = _make_model(hift, window_len=48)
     chunks = _chunks()
 
@@ -175,7 +230,8 @@ def test_incremental_hift_bounded_window_is_close():
     torch.testing.assert_close(incr, full, atol=ATOL, rtol=RTOL)
 
 
-def test_incremental_hift_matches_streaming_reference_within_tolerance():
+@pytest.mark.parametrize("config", CONFIGS)
+def test_incremental_hift_matches_streaming_reference_within_tolerance(config):
     """At the real window length (64) over a long utterance, the windowed path
     must match the full-cumulative streaming re-run to within float32 rounding.
 
@@ -190,7 +246,7 @@ def test_incremental_hift_matches_streaming_reference_within_tolerance():
     comparison in float64 agrees to ~1e-16. So the bound is a tight absolute
     tolerance, not PCM16 byte-equality.
     """
-    hift = _make_hift()
+    hift = _make_hift(config)
     model = _make_model(hift, window_len=64)  # the real _hift_window_len
     chunks = _chunks(total_mel=LONG_TOTAL_MEL)
 

@@ -145,7 +145,10 @@ class SineGen(torch.nn.Module):
         self.voiced_threshold = voiced_threshold
         self.register_buffer(
             "noise_buf",
-            torch.rand(1, 300 * 24000, harmonic_num + 1),
+            # Standard normal, matching the torch.randn_like(sine_waves) draw this
+            # buffer replaces -- upstream SineGen (no causal branch exists for this
+            # class) always draws Gaussian noise here, never uniform.
+            torch.randn(1, 300 * 24000, harmonic_num + 1),
             persistent=False,
         )
 
@@ -185,10 +188,6 @@ class SineGen(torch.nn.Module):
         #        std = self.sine_amp/3 -> max value ~ self.sine_amp
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
-        # Index a fixed buffer by absolute sample position instead of drawing
-        # torch.randn_like: the draw size would depend on the window length and
-        # perturb the global RNG, breaking byte-identity between the full re-run
-        # and the bounded-window streaming path.
         noise = noise_amp * self.noise_buf[:, noise_offset : noise_offset + sine_waves.shape[-1], :].transpose(1, 2)
 
         # first: set the unvoiced part to 0 by uv
@@ -257,9 +256,12 @@ class SineGen2(torch.nn.Module):
         # because 2 * np.pi * n doesn't affect phase
         rad_values = (f0_values / self.sampling_rate) % 1
 
-        # initial phase noise (no noise for fundamental component)
+        # initial phase noise (no noise for fundamental component). Only applied
+        # on the genuine first chunk of a stream (see rationale above the class);
+        # phase_acc is None exactly when there is no carried-forward phase yet.
         if self.training is False and self.causal is True:
-            rad_values[:, 0, :] = rad_values[:, 0, :] + self.rand_ini.to(rad_values.device)
+            if phase_acc is None:
+                rad_values[:, 0, :] = rad_values[:, 0, :] + self.rand_ini.to(rad_values.device)
         else:
             rand_ini = torch.rand(f0_values.shape[0], f0_values.shape[2], device=f0_values.device)
             rand_ini[:, 0] = 0
@@ -312,7 +314,7 @@ class SineGen2(torch.nn.Module):
             new_phase_acc = None
         return sines, new_phase_acc
 
-    def forward(self, f0, phase_acc=None, next_overlap=0, trim=0):
+    def forward(self, f0, phase_acc=None, next_overlap=0, trim=0, noise_offset=0):
         """sine_tensor, uv = forward(f0)
         input F0: tensor(batchsize=1, length, dim=1)
                   f0 for unvoiced steps should be 0
@@ -334,7 +336,11 @@ class SineGen2(torch.nn.Module):
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
         if self.training is False and self.causal is True:
-            noise = noise_amp * self.sine_waves[:, : sine_waves.shape[1]].to(sine_waves.device)
+            # Index by absolute sample position, not window-relative position --
+            # a bounded window's local position 0 is not the utterance's sample 0.
+            noise = noise_amp * self.sine_waves[:, noise_offset : noise_offset + sine_waves.shape[1]].to(
+                sine_waves.device
+            )
         else:
             noise = noise_amp * torch.randn_like(sine_waves)
 
@@ -405,7 +411,9 @@ class SourceModuleHnNSF(torch.nn.Module):
             if isinstance(self.l_sin_gen, SineGen):
                 sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, noise_offset=uv_offset)
             else:
-                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, trim)
+                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(
+                    x, phase_acc, next_overlap, trim, noise_offset=uv_offset
+                )
         sine_merge = self.l_tanh(self.l_linear(sine_wavs))
 
         # source for noise branch, in the same shape as uv
