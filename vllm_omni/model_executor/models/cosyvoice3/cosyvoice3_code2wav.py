@@ -244,16 +244,31 @@ class CosyVoice3Code2Wav(nn.Module):
         window_len = self._hift_window_len
         samples_per_mel = int(np.prod(self.hift.upsample_rates) * self.hift.istft_params["hop_len"])
         trim = int(self.hift.f0_predictor.condnet[0].causal_padding)
+        f0_margin_frames = int(self.hift.f0_predictor.left_context_frames)
+        f0_margin = 0
         if isinstance(cached_mel, torch.Tensor) and cached_mel.numel() > 0:
             cached_mel = cached_mel.to(device=chunk_mel.device, dtype=chunk_mel.dtype)
-            overlap = min(window_len + trim, cached_mel.shape[-1])
+            total_hist = cached_mel.shape[-1]
+            overlap = min(window_len + trim, total_hist)
             window_mel = (
                 torch.cat([cached_mel[..., -overlap:], chunk_mel], dim=-1) if chunk_mel.numel() > 0 else cached_mel
             )
-            window_offset = cached_offset + cached_mel.shape[-1] - overlap
+            window_offset = cached_offset + total_hist - overlap
             uv_offset = window_offset * samples_per_mel
+            if chunk_mel.numel() > 0:
+                f0_margin = min(f0_margin_frames, total_hist - overlap)
+                f0_input_mel = (
+                    torch.cat(
+                        [cached_mel[..., total_hist - overlap - f0_margin : total_hist - overlap], window_mel], dim=-1
+                    )
+                    if f0_margin > 0
+                    else window_mel
+                )
+            else:
+                f0_input_mel = window_mel
         else:
             window_mel = chunk_mel
+            f0_input_mel = chunk_mel
             window_offset = 0
             uv_offset = 0
 
@@ -267,21 +282,20 @@ class CosyVoice3Code2Wav(nn.Module):
         else:
             next_overlap = min(window_len + trim, int(window_mel.shape[-1]))
             tts_speech, _, new_phase_acc = self.hift.inference(
-                speech_feat=window_mel,
+                speech_feat=f0_input_mel,
                 finalize=finalize,
                 phase_acc=phase_acc,
                 uv_offset=uv_offset,
                 next_overlap=next_overlap,
                 trim=trim,
+                f0_margin=f0_margin,
             )
 
         tts_speech = tts_speech.reshape(tts_speech.shape[0], -1)
         new_samples = chunk_mel.shape[-1] * samples_per_mel
         if finalize:
-            # trim (F0 predictor's own held-back frames) must be included: non-final
-            # calls withhold trim + conv_pre_look_right + 1 frames total, not just the
-            # conv_pre/istft portion, or the very last chunk drops trim frames of audio.
-            released = (trim + self.hift.conv_pre_look_right + 1) * samples_per_mel
+            frames_withheld_per_chunk = trim + self.hift.conv_pre_look_right + 1
+            released = frames_withheld_per_chunk * samples_per_mel
             emitted_speech = tts_speech[:, -(new_samples + released) :]
         else:
             emitted_speech = tts_speech[:, -new_samples:] if new_samples > 0 else tts_speech

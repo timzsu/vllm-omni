@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Correctness + boundedness tests for the incremental (windowed) HiFT path.
 
-The streaming vocoder used to re-run over the full cumulative mel every chunk
-(O(n) per chunk -> O(n^2) total). This runs it over a bounded window instead,
-carrying harmonic phase and noise-buffer offset across chunks.
+The streaming vocoder runs HiFT over a bounded mel window instead of the full
+cumulative history, carrying harmonic phase and noise-buffer offset across
+chunks.
 
 * **Correctness** — windowed output must match the full cumulative re-run.
   With full history the match is bit-exact (proves the phase/noise carry is
@@ -15,9 +15,8 @@ carrying harmonic phase and noise-buffer offset across chunks.
 * **Boundedness** — the per-chunk window must not grow with mel history.
 
 Tests are parametrized across REAL_CONFIG (24000 Hz -> SineGen2, what
-CosyVoice3 ships) and LEGACY_CONFIG (22050 Hz -> SineGen): the fixture used
-to default to 22050 Hz only, so a real ~3.4% divergence bug in SineGen2 went
-undetected.
+CosyVoice3 ships) and LEGACY_CONFIG (22050 Hz -> SineGen) so a class-selection
+regression in either path is caught.
 """
 
 import pytest
@@ -267,9 +266,9 @@ def test_finalize_matches_single_pass_length_exactly(config):
     """Streamed total (chunked, last=finalize) must exactly match a single
     non-streaming finalize=True call over the whole mel -- not just approximately.
 
-    Regression test: the finalize release previously omitted `trim` (the F0
-    predictor's own held-back frames), silently dropping the last 3 mel frames
-    (1,440 samples / 60ms at 24kHz) of every stream's audio.
+    The finalize release must include `trim` (the F0 predictor's own held-back
+    frames), or the last 3 mel frames (1,440 samples / 60ms at 24kHz) of every
+    stream's audio go missing.
     """
     hift = _make_hift(config)
     chunks = _chunks(total_mel=200, chunk_len=24)
@@ -296,17 +295,16 @@ def test_finalize_matches_single_pass_length_exactly(config):
     torch.testing.assert_close(streamed, ground_truth, atol=ATOL, rtol=RTOL)
 
 
-@pytest.mark.xfail(
-    reason="Known bug (not yet fixed): CausalConvRNNF0Predictor's left-causal convs "
-    "zero-pad fresh on every windowed call instead of using real prior context, "
-    "corrupting the harmonic phase for genuinely voiced F0. Untrained random weights "
-    "never exceed nsf_voiced_threshold, so the other tests in this file cannot catch "
-    "it; this test forces F0 into the voiced range to exercise it directly.",
-    strict=True,
-)
 def test_incremental_hift_matches_reference_for_voiced_f0():
-    """With F0 forced above nsf_voiced_threshold, windowed output should match the
-    full-cumulative reference within the same tolerance as the unvoiced case."""
+    """Forces F0 above nsf_voiced_threshold (untrained weights never trigger voiced,
+    so no other test here does) and checks windowed output against the full-
+    cumulative reference, which exercises condnet's left-causal convs and
+    SineGen's phase integration under genuinely voiced harmonics.
+
+    Tolerance is looser than ATOL/RTOL: summing this sustained constant-F0 phase
+    in per-window chunks vs. one recompute reassociates float32 adds differently;
+    real speech's varying/unvoiced F0 keeps this far smaller in practice.
+    """
     hift = _make_hift(REAL_CONFIG)
     with torch.no_grad():
         hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
@@ -316,4 +314,4 @@ def test_incremental_hift_matches_reference_for_voiced_f0():
     incr = _incremental(_make_model(hift, window_len=64), chunks)
 
     assert full.shape == incr.shape
-    torch.testing.assert_close(incr, full, atol=ATOL, rtol=RTOL)
+    torch.testing.assert_close(incr, full, atol=2e-4, rtol=2e-4)

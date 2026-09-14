@@ -805,11 +805,15 @@ class CausalHiFTGenerator(HiFTGenerator):
         uv_offset: int = 0,
         next_overlap: int = 0,
         trim: int = 0,
+        f0_margin: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         # mel->f0 NOTE f0_predictor precision is crucial for causal inference, move
         # self.f0_predictor to cpu if necessary
         self.f0_predictor.to("cpu")
         f0 = self.f0_predictor(speech_feat.cpu(), finalize=finalize).to(speech_feat)
+        if f0_margin > 0:
+            f0 = f0[:, f0_margin:]
+            speech_feat = speech_feat[:, :, f0_margin:]
         # f0->source
         s = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
         s, _, _, new_phase_acc = self.m_source(
@@ -976,6 +980,11 @@ class CausalConvRNNF0Predictor(nn.Module):
             nn.ELU(),
         )
         self.classifier = nn.Linear(in_features=cond_channels, out_features=self.num_class)
+        self.left_context_frames = sum(
+            layer.causal_padding
+            for layer in self.condnet
+            if isinstance(layer, CausalConv1d) and layer.causal_type == "left"
+        )
 
     def forward(self, x: torch.Tensor, finalize: bool = True) -> torch.Tensor:
         if finalize is True:

@@ -10,10 +10,9 @@ TTFA/E2E/RTF/per-step latency (mean, stdev, range) per cell. "Step size" is
 ``codec_chunk_frames`` -- how many codec tokens accumulate before stage-1
 fires a flow solve.
 
-Defaults reproduce the matrix used to validate the incremental-HiFT change,
-so running with no flags reproduces it. Per-request correctness is checked:
-non-silent, long enough, and (with a fixed ``--seed``) byte-identical PCM
-across requests for the same text.
+Running with no flags reproduces the default matrix. Per-request correctness
+is checked: non-silent, long enough, and (with a fixed ``--seed``)
+byte-identical PCM across requests for the same text.
 """
 
 import argparse
@@ -287,7 +286,7 @@ def run_combo(args, conc: int, chunk_frames: int, out: Path) -> dict:
             "concurrency": conc,
             "step_size": chunk_frames,
             "ok": n_ok,
-            "errors": args.num_prompts - n_ok,  # not len(results): exceptions never reach it
+            "errors": args.num_prompts - n_ok,
             "correctness_problems": len(problems),
             "correctness_sample": problems[:5],
             "total_audio_s": total_audio_s,
