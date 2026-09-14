@@ -3,44 +3,21 @@
 """Correctness + boundedness tests for the incremental (windowed) HiFT path.
 
 The streaming vocoder used to re-run over the full cumulative mel every chunk
-(O(n) per chunk -> O(n^2) total). The C1 change runs it over a bounded window
-of the last ``_hift_window_len`` mel frames plus the new tail, carrying the
-harmonic phase and noise-buffer offset across chunks.
+(O(n) per chunk -> O(n^2) total). This runs it over a bounded window instead,
+carrying harmonic phase and noise-buffer offset across chunks.
 
-These tests assert the two properties that must hold for the change to be
-sound:
+* **Correctness** — windowed output must match the full cumulative re-run.
+  With full history the match is bit-exact (proves the phase/noise carry is
+  right). With a bounded window, float64 still agrees to ~1e-16 (the window
+  is algebraically exact); float32 differs by ~2e-7 absolute (reassociation
+  rounding, not truncation), so tests assert a tight atol/rtol rather than
+  PCM16 byte-identity, since a sub-LSB perturbation can flip a boundary sample.
+* **Boundedness** — the per-chunk window must not grow with mel history.
 
-* **Correctness** — the windowed path reproduces the full cumulative re-run
-  (the previous behavior).
-
-  - With a window covering the full history the match is **bit-exact**, which
-    proves the phase / noise-offset carry across chunks is right.
-  - With a *bounded* window the two differ only by floating-point
-    **reassociation**: identical arithmetic accumulated in a different order
-    over a short window than over the long cumulative sequence. Evaluated in
-    float64 the two agree to ~1e-16, i.e. the bounded window is algebraically
-    exact — it genuinely captures the full dependency and nothing is lost by
-    truncating history. In float32 the residual is ~2e-7 absolute, about
-    1/150th of a PCM16 quantization step: rounding noise, not truncation error.
-
-  This is why the tests assert a tight ``atol``/``rtol`` rather than
-  byte-identical PCM16. A sub-LSB perturbation can still flip a sample sitting
-  exactly on a rounding boundary (~0.05% of samples do), so PCM16 equality is
-  not a meaningful bar, whereas the float bound is.
-* **Boundedness** — the per-chunk window does not grow with the cumulative mel
-  history, so the O(n) per-chunk slope is actually removed.
-
-``SourceModuleHnNSF`` picks between two harmonic-source implementations by
-sampling rate: ``SineGen`` at 22050 Hz, ``SineGen2`` at anything else --
-CosyVoice3 itself runs at 24000 Hz, so ``SineGen2`` is what actually ships.
-The three correctness tests below are parametrized across both configs
-(``REAL_CONFIG`` / ``LEGACY_CONFIG``) so neither can silently go untested the
-way ``SineGen2`` did during development: the fixture used to default to
-22050 Hz, so every "correctness" assertion was validating the class
-CosyVoice3 does not use, while the shipped ``SineGen2`` path had an
-unguarded fixed-buffer read that diverged from the full recompute by ~3.4%
-under real windowing -- five orders of magnitude past this file's own
-tolerance -- with nothing here able to catch it.
+Tests are parametrized across REAL_CONFIG (24000 Hz -> SineGen2, what
+CosyVoice3 ships) and LEGACY_CONFIG (22050 Hz -> SineGen): the fixture used
+to default to 22050 Hz only, so a real ~3.4% divergence bug in SineGen2 went
+undetected.
 """
 
 import pytest
@@ -61,35 +38,17 @@ CHUNK_LEN = 24
 TOTAL_MEL = 96
 SPM = 480  # samples per mel frame for the small test HiFT (8*5*3*4), matching the real model
 
-# Long enough that the 64-frame window truncates real history for most of the
-# stream. At TOTAL_MEL=96 the window never meaningfully truncates, so a test at
-# that length would pass vacuously.
-LONG_TOTAL_MEL = 400
+LONG_TOTAL_MEL = 400  # long enough that the 64-frame window actually truncates
+PCM16_LSB = 1.0 / 32767.0  # smallest representable PCM16 difference
 
-# One PCM16 quantization step, the smallest difference the streamed audio can
-# actually represent.
-PCM16_LSB = 1.0 / 32767.0
-
-# Tolerance for the bounded-window comparison. Worst observed deviation across
-# seeds {1,2,3} x lengths {96,400,600} x windows {32,64,128} is 1.97e-7
-# absolute (0.0065 x PCM16_LSB), pinned at ~2x float32 epsilon. atol=1e-6 keeps
-# ~5x headroom for BLAS/hardware variation while staying ~30x below one PCM16
-# step, so any real truncation error would fail this bound immediately.
+# Worst observed deviation is 1.97e-7 (~2x float32 eps); atol=1e-6 keeps 5x headroom.
 ATOL = 1e-6
 RTOL = 1e-5
 
-# The config CosyVoice3 actually ships (vllm_omni/transformers_utils/configs/
-# cosyvoice3.py: sample_rate=24000, nb_harmonics=8) -- resolves to SineGen2.
-# nb_harmonics=8 is not a free choice here: SineGen2's causal-mode buffers
-# (rand_ini, sine_waves) are hardcoded to dimension 9 (= harmonic_num + 1)
-# rather than parametrized, matching upstream, so this is the only harmonic
-# count that does not crash on shape mismatch.
+# What CosyVoice3 ships (-> SineGen2). nb_harmonics=8 is required, not a free
+# choice: SineGen2's causal buffers are hardcoded to dim 9 (= harmonic_num+1).
 REAL_CONFIG = {"sampling_rate": 24000, "nb_harmonics": 8}
-
-# The other harmonic-source class (SineGen, sinegen_type="1"), used when
-# sampling_rate == 22050. Not CosyVoice3's own config, but real code this
-# repo ships and could regress silently without its own coverage.
-LEGACY_CONFIG = {"sampling_rate": 22050, "nb_harmonics": 4}
+LEGACY_CONFIG = {"sampling_rate": 22050, "nb_harmonics": 4}  # -> SineGen, still shipped code
 
 CONFIGS = [
     pytest.param(REAL_CONFIG, id="sinegen2_real_config"),
@@ -98,12 +57,7 @@ CONFIGS = [
 
 
 def _make_hift(config: dict = REAL_CONFIG) -> CausalHiFTGenerator:
-    """A small CausalHiFTGenerator with a real (tiny) F0 predictor.
-
-    Defaults to REAL_CONFIG (24000 Hz / SineGen2) -- the class CosyVoice3
-    actually uses -- rather than an arbitrary sampling rate, so a test that
-    forgets to specify a config still exercises the shipped path.
-    """
+    """Small CausalHiFTGenerator; defaults to the config CosyVoice3 ships."""
     torch.manual_seed(0)
     f0_predictor = CausalConvRNNF0Predictor(num_class=1, in_channels=80, cond_channels=16)
     return CausalHiFTGenerator(
@@ -122,14 +76,7 @@ def _make_hift(config: dict = REAL_CONFIG) -> CausalHiFTGenerator:
 
 
 def test_real_config_resolves_to_sinegen2():
-    """Lock in the fact CosyVoice3's own config (24000 Hz) uses SineGen2.
-
-    This is the guard the pre-fix test suite was missing: it existed only
-    for a 22050 Hz fixture (SineGen), so it never actually ran the class
-    CosyVoice3 ships, and a 3.4%-divergence bug in SineGen2's windowed noise
-    handling went undetected. If this assertion ever fails, every test below
-    parametrized on REAL_CONFIG is silently testing the wrong class again.
-    """
+    """Guard against silently testing the wrong SineGen class again."""
     hift = _make_hift(REAL_CONFIG)
     assert isinstance(hift.m_source.l_sin_gen, SineGen2)
 
@@ -153,17 +100,12 @@ def _chunks(total_mel: int = TOTAL_MEL, chunk_len: int = CHUNK_LEN) -> list[torc
 
 
 def _full_reference(model: CosyVoice3Code2Wav, chunks: list[torch.Tensor]) -> torch.Tensor:
-    """Re-run HiFT over the full cumulative mel each chunk (old behavior).
+    """Re-run HiFT over the full cumulative mel each chunk (pre-windowing behavior).
 
-    This is the correct reference for the streaming path: it uses non-finalize
-    inference per chunk (which trims the conv_pre look-right tail), exactly as
-    the pre-C1 streaming vocoder did. A single finalize pass over the whole mel
-    is NOT the right reference — it emits the look-right tail that streaming
-    deliberately holds back, so it is a different (longer) signal.
+    Uses non-finalize inference per chunk, matching the old streaming vocoder; a
+    single finalize pass would emit the look-right tail streaming holds back.
     """
-    # Reset the RNG so the per-call random phase_vec aligns with the incremental
-    # path (both call inference the same number of times).
-    torch.manual_seed(0)
+    torch.manual_seed(0)  # align per-call phase_vec draws with _incremental
     emitted = []
     cache: dict[str, torch.Tensor] | None = None
     for chunk in chunks:
@@ -232,27 +174,18 @@ def test_incremental_hift_bounded_window_is_close(config):
 
 @pytest.mark.parametrize("config", CONFIGS)
 def test_incremental_hift_matches_streaming_reference_within_tolerance(config):
-    """At the real window length (64) over a long utterance, the windowed path
-    must match the full-cumulative streaming re-run to within float32 rounding.
+    """Windowed output matches the full-cumulative reference within float32 rounding.
 
-    This is the load-bearing correctness test: the cumulative history (400 mel
-    frames) far exceeds the window, so truncation — and therefore the phase /
-    noise-offset carry — is genuinely exercised. The reference is the pre-C1
-    behavior (non-finalize per chunk, emitting from a cumulative speech
-    offset), NOT a single finalize pass, which holds back the conv_pre
-    look-right tail and is a different, longer signal.
-
-    The residual is float32 reassociation noise, not truncation error: the same
-    comparison in float64 agrees to ~1e-16. So the bound is a tight absolute
-    tolerance, not PCM16 byte-equality.
+    The load-bearing correctness test: 400 mel frames far exceeds the 64-frame
+    window, so truncation genuinely exercises the phase/noise carry. Float64
+    agrees to ~1e-16, confirming the residual here is rounding, not truncation.
     """
     hift = _make_hift(config)
     model = _make_model(hift, window_len=64)  # the real _hift_window_len
     chunks = _chunks(total_mel=LONG_TOTAL_MEL)
 
-    # Guard: the window must actually truncate, or this test proves nothing.
     trim = int(hift.f0_predictor.condnet[0].causal_padding)
-    assert LONG_TOTAL_MEL > 64 + trim + CHUNK_LEN
+    assert LONG_TOTAL_MEL > 64 + trim + CHUNK_LEN  # window must actually truncate
 
     full = _full_reference(model, chunks)
     incr = _incremental(model, chunks)
@@ -260,9 +193,7 @@ def test_incremental_hift_matches_streaming_reference_within_tolerance(config):
     assert full.shape == incr.shape, f"{full.shape} vs {incr.shape}"
     torch.testing.assert_close(incr, full, atol=ATOL, rtol=RTOL)
 
-    # Audio-domain restatement: the deviation stays far below one PCM16 step,
-    # so it cannot be an audible or structural difference.
-    max_dev = (full - incr).abs().max().item()
+    max_dev = (full - incr).abs().max().item()  # stays far below one PCM16 step
     assert max_dev < PCM16_LSB / 10, f"max deviation {max_dev:.3e} vs PCM16 LSB {PCM16_LSB:.3e}"
 
 
@@ -272,11 +203,7 @@ def test_incremental_hift_window_is_bounded():
     model = _make_model(hift, window_len=32)
     chunks = _chunks(total_mel=200, chunk_len=24)
 
-    # The f0 predictor's condnet[0] is causal_type="right" (kernel 4), so its
-    # output is trimmed by `trim` frames at the END and the f0 at the window's
-    # start needs `trim` frames of history. The window therefore carries
-    # window_len + trim history frames plus the new chunk.
-    trim = int(hift.f0_predictor.condnet[0].causal_padding)
+    trim = int(hift.f0_predictor.condnet[0].causal_padding)  # f0 predictor's own history requirement
 
     cache = None
     window_sizes = []
@@ -284,15 +211,9 @@ def test_incremental_hift_window_is_bounded():
         _, cache = model._stream_hift_from_feat(chunk, cache_state=cache, finalize=False)
         window_sizes.append(int(cache["mel"].shape[-1]))
 
-    # Once the history exceeds the window, the cached window stays at
-    # window_len + trim (overlap) + chunk_len, i.e. bounded regardless of how
-    # long the utterance is.
-    assert max(window_sizes) <= 32 + trim + 24
-    # The window must stop growing once history exceeds the window: the
-    # steady-state value (window_len + trim + chunk_len) repeats. (The final
-    # chunk may be shorter, so compare the two largest, not the last two.)
+    assert max(window_sizes) <= 32 + trim + 24  # bounded regardless of utterance length
     steady = max(window_sizes)
-    assert window_sizes.count(steady) >= 2
+    assert window_sizes.count(steady) >= 2  # steady-state value repeats once history exceeds window
 
 
 def test_incremental_hift_finalize_releases_tail():
@@ -316,10 +237,11 @@ def test_incremental_hift_finalize_releases_tail():
 
 
 def test_incremental_hift_emits_full_audio_length():
-    """The streamed output must cover the full mel history at the correct
-    samples-per-mel rate (product of all upsample rates x hop_len). This guards
-    against the emission arithmetic dropping an upsample stage, which silently
-    truncates the audio (e.g. 1/3 of the expected length with [8,5,3])."""
+    """Streamed output covers the full mel history at samples-per-mel resolution.
+
+    Guards against emission arithmetic dropping an upsample stage, which
+    silently truncates audio (e.g. 1/3 of expected length with [8,5,3]).
+    """
     hift = _make_hift()
     model = _make_model(hift, window_len=32)
     chunks = _chunks(total_mel=72, chunk_len=24)
@@ -334,10 +256,7 @@ def test_incremental_hift_emits_full_audio_length():
             assert cache is None
 
     full = torch.cat(emitted, dim=-1)
-    # Each mel frame yields SPM samples. The emitted length must be on the order
-    # of total_mel * SPM (the finalize releases a small look-right tail, so it
-    # can exceed it slightly) — NOT a small fraction of it, which is the
-    # signature of a dropped upsample stage in the samples-per-mel arithmetic.
+    # total_mel * SPM, +slack for finalize's look-right tail, -slack for a dropped upsample stage
     total_mel = sum(c.shape[-1] for c in chunks)
     assert full.shape[-1] > total_mel * SPM * 0.8, f"{full.shape[-1]} vs {total_mel * SPM}"
     assert full.shape[-1] < total_mel * SPM * 1.5, f"{full.shape[-1]} vs {total_mel * SPM}"

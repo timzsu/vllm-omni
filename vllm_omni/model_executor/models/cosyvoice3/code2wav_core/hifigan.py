@@ -145,9 +145,6 @@ class SineGen(torch.nn.Module):
         self.voiced_threshold = voiced_threshold
         self.register_buffer(
             "noise_buf",
-            # Standard normal, matching the torch.randn_like(sine_waves) draw this
-            # buffer replaces -- upstream SineGen (no causal branch exists for this
-            # class) always draws Gaussian noise here, never uniform.
             torch.randn(1, 300 * 24000, harmonic_num + 1),
             persistent=False,
         )
@@ -336,8 +333,7 @@ class SineGen2(torch.nn.Module):
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
         if self.training is False and self.causal is True:
-            # Index by absolute sample position, not window-relative position --
-            # a bounded window's local position 0 is not the utterance's sample 0.
+            # indexed by absolute sample position, not window-relative position
             noise = noise_amp * self.sine_waves[:, noise_offset : noise_offset + sine_waves.shape[1]].to(
                 sine_waves.device
             )
