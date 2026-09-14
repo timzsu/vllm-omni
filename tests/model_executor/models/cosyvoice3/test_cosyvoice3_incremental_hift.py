@@ -260,3 +260,60 @@ def test_incremental_hift_emits_full_audio_length():
     total_mel = sum(c.shape[-1] for c in chunks)
     assert full.shape[-1] > total_mel * SPM * 0.8, f"{full.shape[-1]} vs {total_mel * SPM}"
     assert full.shape[-1] < total_mel * SPM * 1.5, f"{full.shape[-1]} vs {total_mel * SPM}"
+
+
+@pytest.mark.parametrize("config", CONFIGS)
+def test_finalize_matches_single_pass_length_exactly(config):
+    """Streamed total (chunked, last=finalize) must exactly match a single
+    non-streaming finalize=True call over the whole mel -- not just approximately.
+
+    Regression test: the finalize release previously omitted `trim` (the F0
+    predictor's own held-back frames), silently dropping the last 3 mel frames
+    (1,440 samples / 60ms at 24kHz) of every stream's audio.
+    """
+    hift = _make_hift(config)
+    chunks = _chunks(total_mel=200, chunk_len=24)
+
+    torch.manual_seed(0)
+    full_mel = torch.cat(chunks, dim=-1)
+    ground_truth, _, _ = hift.inference(speech_feat=full_mel, finalize=True)
+    ground_truth = ground_truth.reshape(ground_truth.shape[0], -1)
+
+    hift2 = _make_hift(config)
+    model = _make_model(hift2, window_len=64)
+    torch.manual_seed(0)
+    cache = None
+    emitted = []
+    for i, chunk in enumerate(chunks):
+        finalize = i == len(chunks) - 1
+        speech, cache = model._stream_hift_from_feat(chunk, cache_state=cache, finalize=finalize)
+        emitted.append(speech.reshape(speech.shape[0], -1))
+    streamed = torch.cat(emitted, dim=-1)
+
+    assert streamed.shape[-1] == ground_truth.shape[-1], (
+        f"{streamed.shape[-1]} vs {ground_truth.shape[-1]} (diff={ground_truth.shape[-1] - streamed.shape[-1]} samples)"
+    )
+    torch.testing.assert_close(streamed, ground_truth, atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.xfail(
+    reason="Known bug (not yet fixed): CausalConvRNNF0Predictor's left-causal convs "
+    "zero-pad fresh on every windowed call instead of using real prior context, "
+    "corrupting the harmonic phase for genuinely voiced F0. Untrained random weights "
+    "never exceed nsf_voiced_threshold, so the other tests in this file cannot catch "
+    "it; this test forces F0 into the voiced range to exercise it directly.",
+    strict=True,
+)
+def test_incremental_hift_matches_reference_for_voiced_f0():
+    """With F0 forced above nsf_voiced_threshold, windowed output should match the
+    full-cumulative reference within the same tolerance as the unvoiced case."""
+    hift = _make_hift(REAL_CONFIG)
+    with torch.no_grad():
+        hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
+    chunks = _chunks(total_mel=200, chunk_len=24)
+
+    full = _full_reference(_make_model(hift, window_len=400), chunks)
+    incr = _incremental(_make_model(hift, window_len=64), chunks)
+
+    assert full.shape == incr.shape
+    torch.testing.assert_close(incr, full, atol=ATOL, rtol=RTOL)

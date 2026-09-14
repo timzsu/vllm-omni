@@ -287,7 +287,7 @@ def run_combo(args, conc: int, chunk_frames: int, out: Path) -> dict:
             "concurrency": conc,
             "step_size": chunk_frames,
             "ok": n_ok,
-            "errors": len(results) - n_ok,
+            "errors": args.num_prompts - n_ok,  # not len(results): exceptions never reach it
             "correctness_problems": len(problems),
             "correctness_sample": problems[:5],
             "total_audio_s": total_audio_s,

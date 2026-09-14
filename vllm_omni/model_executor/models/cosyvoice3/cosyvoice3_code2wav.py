@@ -278,7 +278,10 @@ class CosyVoice3Code2Wav(nn.Module):
         tts_speech = tts_speech.reshape(tts_speech.shape[0], -1)
         new_samples = chunk_mel.shape[-1] * samples_per_mel
         if finalize:
-            released = (self.hift.conv_pre_look_right + 1) * samples_per_mel
+            # trim (F0 predictor's own held-back frames) must be included: non-final
+            # calls withhold trim + conv_pre_look_right + 1 frames total, not just the
+            # conv_pre/istft portion, or the very last chunk drops trim frames of audio.
+            released = (trim + self.hift.conv_pre_look_right + 1) * samples_per_mel
             emitted_speech = tts_speech[:, -(new_samples + released) :]
         else:
             emitted_speech = tts_speech[:, -new_samples:] if new_samples > 0 else tts_speech
