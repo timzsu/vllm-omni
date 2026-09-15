@@ -120,6 +120,27 @@ def _carry_phase_at_boundary(
     return cum_total.narrow(dim, idx, 1) % 1
 
 
+def _wrapped_slice(buf: torch.Tensor, offset: int, length: int, dim: int = 1) -> torch.Tensor:
+    """``length`` elements of ``buf`` along ``dim`` starting at ``offset``,
+    wrapping around (mod ``buf.shape[dim]``) rather than running past the end.
+
+    Shared by SineGen/SineGen2/SourceModuleHnNSF's position-indexed noise
+    buffers: streams now run far longer than the 300s buffers were sized for,
+    so a stream just keeps repeating the noise realization past that point
+    instead of the slice silently coming back short and failing to broadcast.
+    """
+    n = buf.shape[dim]
+    start = offset % n
+    parts = []
+    remaining = length
+    while remaining > 0:
+        take = min(remaining, n - start)
+        parts.append(buf.narrow(dim, start, take))
+        remaining -= take
+        start = 0
+    return parts[0] if len(parts) == 1 else torch.cat(parts, dim=dim)
+
+
 class SineGen(torch.nn.Module):
     """Definition of sine generator
     SineGen(samp_rate, harmonic_num = 0,
@@ -143,6 +164,11 @@ class SineGen(torch.nn.Module):
         self.harmonic_num = harmonic_num
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
+        # Fixed per-harmonic phase offset (constant per model instance, like
+        # SineGen2's rand_ini), not redrawn per call: each harmonic would
+        # otherwise jump to a new random phase at every window boundary.
+        self.phase_vec = Uniform(low=-np.pi, high=np.pi).sample(sample_shape=(1, harmonic_num + 1, 1))
+        self.phase_vec[:, 0, :] = 0
         self.register_buffer(
             "noise_buf",
             torch.randn(1, 300 * 24000, harmonic_num + 1),
@@ -171,9 +197,7 @@ class SineGen(torch.nn.Module):
         cum_total = cum if phase_acc is None else phase_acc + cum
         theta_mat = 2 * np.pi * (cum_total % 1)
         new_phase_acc = _carry_phase_at_boundary(cum_total, phase_acc, next_overlap, dim=-1)
-        u_dist = Uniform(low=-np.pi, high=np.pi)
-        phase_vec = u_dist.sample(sample_shape=(f0.size(0), self.harmonic_num + 1, 1)).to(F_mat.device)
-        phase_vec[:, 0, :] = 0
+        phase_vec = self.phase_vec.to(F_mat.device)
 
         # generate sine waveforms
         sine_waves = self.sine_amp * torch.sin(theta_mat + phase_vec)
@@ -185,7 +209,7 @@ class SineGen(torch.nn.Module):
         #        std = self.sine_amp/3 -> max value ~ self.sine_amp
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
-        noise = noise_amp * self.noise_buf[:, noise_offset : noise_offset + sine_waves.shape[-1], :].transpose(1, 2)
+        noise = noise_amp * _wrapped_slice(self.noise_buf, noise_offset, sine_waves.shape[-1]).transpose(1, 2)
 
         # first: set the unvoiced part to 0 by uv
         # then: additive noise
@@ -339,9 +363,7 @@ class SineGen2(torch.nn.Module):
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
         if self.training is False and self.causal is True:
             # indexed by absolute sample position, not window-relative position
-            noise = noise_amp * self.sine_waves[:, noise_offset : noise_offset + sine_waves.shape[1]].to(
-                sine_waves.device
-            )
+            noise = noise_amp * _wrapped_slice(self.sine_waves, noise_offset, sine_waves.shape[1]).to(sine_waves.device)
         else:
             noise = noise_amp * torch.randn_like(sine_waves)
 
@@ -424,7 +446,7 @@ class SourceModuleHnNSF(torch.nn.Module):
 
         # source for noise branch, in the same shape as uv
         if self.training is False and self.causal is True:
-            noise = self.uv[:, uv_offset : uv_offset + uv.shape[1]] * self.sine_amp / 3
+            noise = _wrapped_slice(self.uv, uv_offset, uv.shape[1]) * self.sine_amp / 3
         else:
             noise = torch.randn_like(uv) * self.sine_amp / 3
         return sine_merge, noise, uv, new_phase_acc

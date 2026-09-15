@@ -132,6 +132,11 @@ class CosyVoice3Code2Wav(nn.Module):
         self.mel_cache_len = 20
         self.source_cache_len = int(self.mel_cache_len * 256)
         self.speech_window = np.hamming(2 * self.source_cache_len)
+        # Must cover CausalHiFTGenerator.decode()'s own causal receptive field
+        # (upsample + resblock stack), not just the F0 predictor's derived
+        # margin: window_len=48 already passes
+        # test_incremental_hift_bounded_window_is_close, so 64 has real
+        # headroom rather than being an untested guess.
         self._hift_window_len = 64
 
     @property

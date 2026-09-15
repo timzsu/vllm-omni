@@ -28,6 +28,7 @@ from vllm_omni.model_executor.models.cosyvoice3.code2wav_core.hifigan import (
     CausalHiFTGenerator,
     SineGen,
     SineGen2,
+    _wrapped_slice,
 )
 from vllm_omni.model_executor.models.cosyvoice3.cosyvoice3_code2wav import CosyVoice3Code2Wav
 
@@ -116,7 +117,7 @@ def _full_reference(model: CosyVoice3Code2Wav, chunks: list[torch.Tensor]) -> to
     Uses non-finalize inference per chunk, matching the old streaming vocoder; a
     single finalize pass would emit the look-right tail streaming holds back.
     """
-    torch.manual_seed(0)  # align per-call phase_vec draws with _incremental
+    torch.manual_seed(0)
     emitted = []
     cache: dict[str, torch.Tensor] | None = None
     for chunk in chunks:
@@ -350,3 +351,17 @@ def test_incremental_hift_matches_reference_for_voiced_f0_small_chunks(first_len
 
     assert full.shape == incr.shape
     torch.testing.assert_close(incr, full, atol=2e-4, rtol=2e-4)
+
+
+def test_wrapped_slice_wraps_position_deterministically():
+    """SineGen/SineGen2/SourceModuleHnNSF's noise buffers are a fixed 300s at
+    24kHz; a stream running past that must keep repeating the realization
+    (position-deterministic) rather than the slice coming back short and
+    failing to broadcast against the rest of that call's tensors.
+    """
+    buf = torch.arange(10).reshape(1, 10, 1)
+
+    assert _wrapped_slice(buf, 2, 3).flatten().tolist() == [2, 3, 4]
+    assert _wrapped_slice(buf, 8, 4).flatten().tolist() == [8, 9, 0, 1]
+    assert _wrapped_slice(buf, 12, 3).flatten().tolist() == [2, 3, 4]  # offset past the end
+    assert _wrapped_slice(buf, 5, 13).flatten().tolist() == [5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7]
