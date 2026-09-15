@@ -309,17 +309,18 @@ def test_finalize_matches_single_pass_length_exactly(config):
     torch.testing.assert_close(streamed, ground_truth, atol=ATOL, rtol=RTOL)
 
 
-def test_incremental_hift_matches_reference_for_voiced_f0():
+@pytest.mark.parametrize("config", CONFIGS)
+def test_incremental_hift_matches_reference_for_voiced_f0(config):
     """Forces F0 above nsf_voiced_threshold (untrained weights never trigger voiced,
     so no other test here does) and checks windowed output against the full-
     cumulative reference, which exercises condnet's left-causal convs and
-    SineGen's phase integration under genuinely voiced harmonics.
+    SineGen/SineGen2's phase integration under genuinely voiced harmonics.
 
     Tolerance is looser than ATOL/RTOL: summing this sustained constant-F0 phase
     in per-window chunks vs. one recompute reassociates float32 adds differently;
     real speech's varying/unvoiced F0 keeps this far smaller in practice.
     """
-    hift = _make_hift(REAL_CONFIG)
+    hift = _make_hift(config)
     with torch.no_grad():
         hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
     chunks = _chunks(total_mel=200, chunk_len=24)
@@ -331,8 +332,9 @@ def test_incremental_hift_matches_reference_for_voiced_f0():
     torch.testing.assert_close(incr, full, atol=2e-4, rtol=2e-4)
 
 
+@pytest.mark.parametrize("config", CONFIGS)
 @pytest.mark.parametrize("first_len,step_len", [(10, 6), (10, 3), (20, 3), (10, 1)])
-def test_incremental_hift_matches_reference_for_voiced_f0_small_chunks(first_len, step_len):
+def test_incremental_hift_matches_reference_for_voiced_f0_small_chunks(config, first_len, step_len):
     """Same as test_incremental_hift_matches_reference_for_voiced_f0, but with small,
     sub-receptive-field chunk sizes (down to 1 mel frame) instead of the uniform
     24-frame chunks used elsewhere. cache_state must carry the F0 predictor's own
@@ -341,7 +343,7 @@ def test_incremental_hift_matches_reference_for_voiced_f0_small_chunks(first_len
     history -- corrupting SineGen's phase integration the same way as an absent
     margin entirely.
     """
-    hift = _make_hift(REAL_CONFIG)
+    hift = _make_hift(config)
     with torch.no_grad():
         hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
     chunks = _variable_chunks(total_mel=200, first_len=first_len, step_len=step_len)
@@ -365,3 +367,29 @@ def test_wrapped_slice_wraps_position_deterministically():
     assert _wrapped_slice(buf, 8, 4).flatten().tolist() == [8, 9, 0, 1]
     assert _wrapped_slice(buf, 12, 3).flatten().tolist() == [2, 3, 4]  # offset past the end
     assert _wrapped_slice(buf, 5, 13).flatten().tolist() == [5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def test_incremental_hift_empty_middle_chunk_emits_nothing():
+    """An empty middle chunk (reachable from forward_streaming_batch when a
+    row's post-trim feat comes out empty near the lookahead boundary) must
+    emit zero samples and leave cache_state's phase_acc unchanged, not
+    re-emit the re-decoded overlap window as if it were new audio.
+    """
+    hift = _make_hift(REAL_CONFIG)
+    model = _make_model(hift, window_len=64)
+    chunks = _chunks(total_mel=96, chunk_len=24)
+    empty = chunks[0][:, :, :0]
+
+    cache = None
+    for chunk in chunks[:2]:
+        _, cache = model._stream_hift_from_feat(chunk, cache_state=cache, finalize=False)
+    assert cache is not None
+    phase_acc_before = cache["phase_acc"]
+
+    speech, cache = model._stream_hift_from_feat(empty, cache_state=cache, finalize=False)
+
+    assert speech.shape[-1] == 0
+    if phase_acc_before is None:
+        assert cache["phase_acc"] is None
+    else:
+        torch.testing.assert_close(cache["phase_acc"], phase_acc_before)

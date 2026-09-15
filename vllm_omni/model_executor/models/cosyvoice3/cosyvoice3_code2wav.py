@@ -132,11 +132,9 @@ class CosyVoice3Code2Wav(nn.Module):
         self.mel_cache_len = 20
         self.source_cache_len = int(self.mel_cache_len * 256)
         self.speech_window = np.hamming(2 * self.source_cache_len)
-        # Must cover CausalHiFTGenerator.decode()'s own causal receptive field
-        # (upsample + resblock stack), not just the F0 predictor's derived
-        # margin: window_len=48 already passes
-        # test_incremental_hift_bounded_window_is_close, so 64 has real
-        # headroom rather than being an untested guess.
+        # Must cover decode()'s own causal receptive field, not just the F0
+        # margin; window_len=48 already passes
+        # test_incremental_hift_bounded_window_is_close, so 64 has headroom.
         self._hift_window_len = 64
 
     @property
@@ -298,7 +296,7 @@ class CosyVoice3Code2Wav(nn.Module):
             released = frames_withheld_per_chunk * samples_per_mel
             emitted_speech = tts_speech[:, -(new_samples + released) :]
         else:
-            emitted_speech = tts_speech[:, -new_samples:] if new_samples > 0 else tts_speech
+            emitted_speech = tts_speech[:, -new_samples:] if new_samples > 0 else tts_speech[:, :0]
 
         if finalize:
             return emitted_speech.reshape(emitted_speech.shape[0], 1, -1), None

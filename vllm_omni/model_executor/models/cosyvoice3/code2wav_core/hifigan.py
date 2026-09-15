@@ -122,12 +122,9 @@ def _carry_phase_at_boundary(
 
 def _wrapped_slice(buf: torch.Tensor, offset: int, length: int, dim: int = 1) -> torch.Tensor:
     """``length`` elements of ``buf`` along ``dim`` starting at ``offset``,
-    wrapping around (mod ``buf.shape[dim]``) rather than running past the end.
-
-    Shared by SineGen/SineGen2/SourceModuleHnNSF's position-indexed noise
-    buffers: streams now run far longer than the 300s buffers were sized for,
-    so a stream just keeps repeating the noise realization past that point
-    instead of the slice silently coming back short and failing to broadcast.
+    wrapping (mod ``buf.shape[dim]``) instead of running past the end and
+    coming back short. Shared by SineGen/SineGen2/SourceModuleHnNSF's
+    position-indexed noise buffers, now that streams can outlast their 300s.
     """
     n = buf.shape[dim]
     start = offset % n
@@ -164,9 +161,8 @@ class SineGen(torch.nn.Module):
         self.harmonic_num = harmonic_num
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
-        # Fixed per-harmonic phase offset (constant per model instance, like
-        # SineGen2's rand_ini), not redrawn per call: each harmonic would
-        # otherwise jump to a new random phase at every window boundary.
+        # Fixed per model instance like SineGen2's rand_ini, not redrawn per
+        # call, or each harmonic jumps to a new random phase every window.
         self.phase_vec = Uniform(low=-np.pi, high=np.pi).sample(sample_shape=(1, harmonic_num + 1, 1))
         self.phase_vec[:, 0, :] = 0
         self.register_buffer(
@@ -181,12 +177,16 @@ class SineGen(torch.nn.Module):
         return uv
 
     @torch.no_grad()
-    def forward(self, f0, phase_acc=None, next_overlap=0, noise_offset=0):
+    def forward(self, f0, phase_acc=None, next_overlap=0, trim=0, noise_offset=0):
         """sine_tensor, uv = forward(f0)
         input F0: tensor(batchsize=1, dim=1, length)
                   f0 for unvoiced steps should be 0
         output sine_tensor: tensor(batchsize=1, length, dim)
         output uv: tensor(batchsize=1, length, 1)
+
+        ``next_overlap`` and ``trim`` are sample-indexed here (``f0`` arrives
+        post-``f0_upsamp``), unlike SineGen2 which downsamples to mel rate
+        before its own cumsum -- callers must scale both by samples-per-mel.
         """
         f0 = f0.transpose(1, 2)
         F_mat = torch.zeros((f0.size(0), self.harmonic_num + 1, f0.size(-1))).to(f0.device)
@@ -196,7 +196,7 @@ class SineGen(torch.nn.Module):
         cum = torch.cumsum(F_mat, dim=-1)
         cum_total = cum if phase_acc is None else phase_acc + cum
         theta_mat = 2 * np.pi * (cum_total % 1)
-        new_phase_acc = _carry_phase_at_boundary(cum_total, phase_acc, next_overlap, dim=-1)
+        new_phase_acc = _carry_phase_at_boundary(cum_total, phase_acc, next_overlap, dim=-1, trim=trim)
         phase_vec = self.phase_vec.to(F_mat.device)
 
         # generate sine waveforms
@@ -345,8 +345,6 @@ class SineGen2(torch.nn.Module):
         # fundamental component
         fn = torch.multiply(f0, self.harmonic_ids)
 
-        # Non-causal callers (base HiFTGenerator and anything patching _f02sine
-        # against its original single-argument form) keep that exact call.
         if self.causal:
             sine_waves, new_phase_acc = self._f02sine(fn, phase_acc, next_overlap, trim)
         else:
@@ -406,6 +404,7 @@ class SourceModuleHnNSF(torch.nn.Module):
 
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
+        self.upsample_scale = upsample_scale
 
         # to produce sine waveforms
         if sinegen_type == "1":
@@ -429,15 +428,19 @@ class SourceModuleHnNSF(torch.nn.Module):
         Sine_source (batchsize, length, 1)
         noise_source (batchsize, length 1)
         """
-        # source for harmonic branch. Non-causal callers (base HiFTGenerator,
-        # and any l_sin_gen built against its original single-argument form)
-        # keep that exact call.
         with torch.no_grad():
             if not self.causal:
                 sine_wavs, uv, _ = self.l_sin_gen(x)
                 new_phase_acc = None
             elif isinstance(self.l_sin_gen, SineGen):
-                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, noise_offset=uv_offset)
+                # next_overlap/trim arrive in mel frames; SineGen needs samples.
+                sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(
+                    x,
+                    phase_acc,
+                    next_overlap * self.upsample_scale,
+                    trim * self.upsample_scale,
+                    noise_offset=uv_offset,
+                )
             else:
                 sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(
                     x, phase_acc, next_overlap, trim, noise_offset=uv_offset
