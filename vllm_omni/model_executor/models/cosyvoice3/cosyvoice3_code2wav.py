@@ -250,22 +250,17 @@ class CosyVoice3Code2Wav(nn.Module):
             cached_mel = cached_mel.to(device=chunk_mel.device, dtype=chunk_mel.dtype)
             total_hist = cached_mel.shape[-1]
             overlap = min(window_len + trim, total_hist)
-            window_mel = (
-                torch.cat([cached_mel[..., -overlap:], chunk_mel], dim=-1) if chunk_mel.numel() > 0 else cached_mel
-            )
+            window_mel = torch.cat([cached_mel[..., -overlap:], chunk_mel], dim=-1)
             window_offset = cached_offset + total_hist - overlap
             uv_offset = window_offset * samples_per_mel
-            if chunk_mel.numel() > 0:
-                f0_margin = min(f0_margin_frames, total_hist - overlap)
-                f0_input_mel = (
-                    torch.cat(
-                        [cached_mel[..., total_hist - overlap - f0_margin : total_hist - overlap], window_mel], dim=-1
-                    )
-                    if f0_margin > 0
-                    else window_mel
+            f0_margin = min(f0_margin_frames, total_hist - overlap)
+            f0_input_mel = (
+                torch.cat(
+                    [cached_mel[..., total_hist - overlap - f0_margin : total_hist - overlap], window_mel], dim=-1
                 )
-            else:
-                f0_input_mel = window_mel
+                if f0_margin > 0
+                else window_mel
+            )
         else:
             window_mel = chunk_mel
             f0_input_mel = chunk_mel
@@ -280,7 +275,7 @@ class CosyVoice3Code2Wav(nn.Module):
             tts_speech = torch.zeros((chunk_mel.shape[0], 1, 0), device=chunk_mel.device, dtype=chunk_mel.dtype)
             new_phase_acc = phase_acc
         else:
-            next_overlap = min(window_len + trim, int(window_mel.shape[-1]))
+            next_overlap = min(window_len + trim, window_mel.shape[-1])
             tts_speech, _, new_phase_acc = self.hift.inference(
                 speech_feat=f0_input_mel,
                 finalize=finalize,
@@ -304,8 +299,8 @@ class CosyVoice3Code2Wav(nn.Module):
             return emitted_speech.reshape(emitted_speech.shape[0], 1, -1), None
 
         new_state = {
-            "mel": window_mel.detach().cpu().contiguous(),
-            "mel_offset": window_offset,
+            "mel": f0_input_mel.detach().cpu().contiguous(),
+            "mel_offset": window_offset - f0_margin,
             "phase_acc": new_phase_acc.detach().cpu().contiguous() if new_phase_acc is not None else None,
         }
         return emitted_speech.reshape(emitted_speech.shape[0], 1, -1), new_state

@@ -98,6 +98,18 @@ def _chunks(total_mel: int = TOTAL_MEL, chunk_len: int = CHUNK_LEN) -> list[torc
     return [mel[:, :, i : i + chunk_len] for i in range(0, total_mel, chunk_len)]
 
 
+def _variable_chunks(total_mel: int, first_len: int, step_len: int) -> list[torch.Tensor]:
+    """First chunk sized like a real prompt prefill, then small fixed-size steps."""
+    torch.manual_seed(1)
+    mel = torch.randn(1, 80, total_mel)
+    chunks = [mel[:, :, :first_len]]
+    pos = first_len
+    while pos < total_mel:
+        chunks.append(mel[:, :, pos : pos + step_len])
+        pos += step_len
+    return chunks
+
+
 def _full_reference(model: CosyVoice3Code2Wav, chunks: list[torch.Tensor]) -> torch.Tensor:
     """Re-run HiFT over the full cumulative mel each chunk (pre-windowing behavior).
 
@@ -202,7 +214,8 @@ def test_incremental_hift_window_is_bounded():
     model = _make_model(hift, window_len=32)
     chunks = _chunks(total_mel=200, chunk_len=24)
 
-    trim = int(hift.f0_predictor.condnet[0].causal_padding)  # f0 predictor's own history requirement
+    trim = int(hift.f0_predictor.condnet[0].causal_padding)
+    f0_margin = int(hift.f0_predictor.left_context_frames)
 
     cache = None
     window_sizes = []
@@ -210,7 +223,7 @@ def test_incremental_hift_window_is_bounded():
         _, cache = model._stream_hift_from_feat(chunk, cache_state=cache, finalize=False)
         window_sizes.append(int(cache["mel"].shape[-1]))
 
-    assert max(window_sizes) <= 32 + trim + 24  # bounded regardless of utterance length
+    assert max(window_sizes) <= 32 + trim + f0_margin + 24  # bounded regardless of utterance length
     steady = max(window_sizes)
     assert window_sizes.count(steady) >= 2  # steady-state value repeats once history exceeds window
 
@@ -309,6 +322,28 @@ def test_incremental_hift_matches_reference_for_voiced_f0():
     with torch.no_grad():
         hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
     chunks = _chunks(total_mel=200, chunk_len=24)
+
+    full = _full_reference(_make_model(hift, window_len=400), chunks)
+    incr = _incremental(_make_model(hift, window_len=64), chunks)
+
+    assert full.shape == incr.shape
+    torch.testing.assert_close(incr, full, atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("first_len,step_len", [(10, 6), (10, 3), (20, 3), (10, 1)])
+def test_incremental_hift_matches_reference_for_voiced_f0_small_chunks(first_len, step_len):
+    """Same as test_incremental_hift_matches_reference_for_voiced_f0, but with small,
+    sub-receptive-field chunk sizes (down to 1 mel frame) instead of the uniform
+    24-frame chunks used elsewhere. cache_state must carry the F0 predictor's own
+    left receptive field across calls regardless of how small a single chunk is,
+    or the next call's margin comes up short and substitutes zero-padding for real
+    history -- corrupting SineGen's phase integration the same way as an absent
+    margin entirely.
+    """
+    hift = _make_hift(REAL_CONFIG)
+    with torch.no_grad():
+        hift.f0_predictor.classifier.bias.fill_(150.0)  # clearly voiced (threshold is 10)
+    chunks = _variable_chunks(total_mel=200, first_len=first_len, step_len=step_len)
 
     full = _full_reference(_make_model(hift, window_len=400), chunks)
     incr = _incremental(_make_model(hift, window_len=64), chunks)
