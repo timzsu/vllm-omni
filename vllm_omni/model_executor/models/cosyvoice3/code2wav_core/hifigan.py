@@ -321,8 +321,13 @@ class SineGen2(torch.nn.Module):
         # fundamental component
         fn = torch.multiply(f0, self.harmonic_ids)
 
-        # generate sine waveforms
-        sine_waves, new_phase_acc = self._f02sine(fn, phase_acc, next_overlap, trim)
+        # Non-causal callers (base HiFTGenerator and anything patching _f02sine
+        # against its original single-argument form) keep that exact call.
+        if self.causal:
+            sine_waves, new_phase_acc = self._f02sine(fn, phase_acc, next_overlap, trim)
+        else:
+            sine_waves = self._f02sine(fn)
+            new_phase_acc = None
         sine_waves = sine_waves * self.sine_amp
 
         # generate uv signal
@@ -402,9 +407,14 @@ class SourceModuleHnNSF(torch.nn.Module):
         Sine_source (batchsize, length, 1)
         noise_source (batchsize, length 1)
         """
-        # source for harmonic branch
+        # source for harmonic branch. Non-causal callers (base HiFTGenerator,
+        # and any l_sin_gen built against its original single-argument form)
+        # keep that exact call.
         with torch.no_grad():
-            if isinstance(self.l_sin_gen, SineGen):
+            if not self.causal:
+                sine_wavs, uv, _ = self.l_sin_gen(x)
+                new_phase_acc = None
+            elif isinstance(self.l_sin_gen, SineGen):
                 sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(x, phase_acc, next_overlap, noise_offset=uv_offset)
             else:
                 sine_wavs, uv, _, new_phase_acc = self.l_sin_gen(
