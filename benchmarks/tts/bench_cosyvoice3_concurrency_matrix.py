@@ -203,13 +203,13 @@ def one_request(client, url, model, text, ref_audio, ref_text, chunk_frames, see
             if not chunk:
                 continue
             now = time.perf_counter()
+            if ttfa is None:
+                ttfa = now - t0
             last_now = now
             received += len(chunk)
             nbytes += len(chunk)
             audio_bytes += chunk
             while received >= next_boundary:
-                if ttfa is None:
-                    ttfa = now - t0
                 if prev_t is not None:
                     chunk_gaps_ms.append((step_idx, (now - prev_t) * 1e3))
                     step_idx += 1
@@ -220,8 +220,6 @@ def one_request(client, url, model, text, ref_audio, ref_text, chunk_frames, see
     if received > last_crossed_bytes:
         # Finalize chunk: releases extra held-back frames, so it doesn't
         # match a predicted hop size -- its arrival is the stream closing.
-        if ttfa is None:
-            ttfa = last_now - t0
         if prev_t is not None:
             chunk_gaps_ms.append((step_idx, (last_now - prev_t) * 1e3))
             step_idx += 1
@@ -473,12 +471,17 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     all_results = []
+    failed = False
     for conc in args.concurrency:
         for chunk_frames in args.step_size:
             try:
-                all_results.append(run_combo(args, conc, chunk_frames, out))
+                result = run_combo(args, conc, chunk_frames, out)
+                all_results.append(result)
+                if result["errors"] > 0 or result["correctness_problems"] > 0:
+                    failed = True
             except Exception as e:
                 print(f"  combo c={conc} chunk={chunk_frames} FAILED: {e}", flush=True)
+                failed = True
 
     out_path = out / "steps_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
@@ -505,6 +508,9 @@ def main() -> None:
                 f"+-{stats['e2e_s']['stdev'] * 1e3:6.1f} ms  (n={stats['e2e_s']['n']}, "
                 f"audio {stats['audio_s']['mean']:.1f}s)"
             )
+
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

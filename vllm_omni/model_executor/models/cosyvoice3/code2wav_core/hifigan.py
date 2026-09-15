@@ -166,11 +166,12 @@ class SineGen(torch.nn.Module):
         # call, or each harmonic jumps to a new random phase every window.
         self.phase_vec = Uniform(low=-np.pi, high=np.pi).sample(sample_shape=(1, harmonic_num + 1, 1))
         self.phase_vec[:, 0, :] = 0
-        self.register_buffer(
-            "noise_buf",
-            torch.randn(1, 300 * 24000, harmonic_num + 1),
-            persistent=False,
-        )
+        if causal:
+            self.register_buffer(
+                "noise_buf",
+                torch.randn(1, 300 * 24000, harmonic_num + 1),
+                persistent=False,
+            )
 
     def _f02uv(self, f0):
         # generate uv signal
