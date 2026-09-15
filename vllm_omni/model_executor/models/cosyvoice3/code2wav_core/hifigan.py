@@ -154,13 +154,14 @@ class SineGen(torch.nn.Module):
         segment is always sin(np.pi) or cos(0)
     """
 
-    def __init__(self, samp_rate, harmonic_num=0, sine_amp=0.1, noise_std=0.003, voiced_threshold=0):
+    def __init__(self, samp_rate, harmonic_num=0, sine_amp=0.1, noise_std=0.003, voiced_threshold=0, causal=False):
         super().__init__()
         self.sine_amp = sine_amp
         self.noise_std = noise_std
         self.harmonic_num = harmonic_num
         self.sampling_rate = samp_rate
         self.voiced_threshold = voiced_threshold
+        self.causal = causal
         # Fixed per model instance like SineGen2's rand_ini, not redrawn per
         # call, or each harmonic jumps to a new random phase every window.
         self.phase_vec = Uniform(low=-np.pi, high=np.pi).sample(sample_shape=(1, harmonic_num + 1, 1))
@@ -209,12 +210,17 @@ class SineGen(torch.nn.Module):
         #        std = self.sine_amp/3 -> max value ~ self.sine_amp
         # .       for voiced regions is self.noise_std
         noise_amp = uv * self.noise_std + (1 - uv) * self.sine_amp / 3
-        noise = noise_amp * _wrapped_slice(self.noise_buf, noise_offset, sine_waves.shape[-1]).transpose(1, 2)
+        if self.training is False and self.causal is True:
+            noise = noise_amp * _wrapped_slice(self.noise_buf, noise_offset, sine_waves.shape[-1]).transpose(1, 2)
+        else:
+            noise = noise_amp * torch.randn_like(sine_waves)
 
         # first: set the unvoiced part to 0 by uv
         # then: additive noise
         sine_waves = sine_waves * uv + noise
-        return sine_waves.transpose(1, 2), uv.transpose(1, 2), noise, new_phase_acc
+        if self.causal:
+            return sine_waves.transpose(1, 2), uv.transpose(1, 2), noise, new_phase_acc
+        return sine_waves.transpose(1, 2), uv.transpose(1, 2), noise
 
 
 class SineGen2(torch.nn.Module):
@@ -333,7 +339,7 @@ class SineGen2(torch.nn.Module):
             # get the sines
             sines = torch.cos(i_phase * 2 * np.pi)
             new_phase_acc = None
-        return sines, new_phase_acc
+        return (sines, new_phase_acc) if self.causal else sines
 
     def forward(self, f0, phase_acc=None, next_overlap=0, trim=0, noise_offset=0):
         """sine_tensor, uv = forward(f0)
@@ -368,7 +374,7 @@ class SineGen2(torch.nn.Module):
         # first: set the unvoiced part to 0 by uv
         # then: additive noise
         sine_waves = sine_waves * uv + noise
-        return sine_waves, uv, noise, new_phase_acc
+        return (sine_waves, uv, noise, new_phase_acc) if self.causal else (sine_waves, uv, noise)
 
 
 class SourceModuleHnNSF(torch.nn.Module):
@@ -408,7 +414,9 @@ class SourceModuleHnNSF(torch.nn.Module):
 
         # to produce sine waveforms
         if sinegen_type == "1":
-            self.l_sin_gen = SineGen(sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshold)
+            self.l_sin_gen = SineGen(
+                sampling_rate, harmonic_num, sine_amp, add_noise_std, voiced_threshold, causal=causal
+            )
         else:
             self.l_sin_gen = SineGen2(
                 sampling_rate, upsample_scale, harmonic_num, sine_amp, add_noise_std, voiced_threshold, causal=causal
